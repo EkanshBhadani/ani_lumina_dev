@@ -1,82 +1,64 @@
-import os
 import aiohttp
-from typing import List, Dict, Any, Optional
-from cache import aiorun_cached
-from models import parse_anime, parse_manga, Anime, Manga
-
-BASE = "https://api.myanimelist.net/v2"
-FIELDS_ANIME = "id,title,main_picture,mean,rank,status,num_episodes,start_date"
-FIELDS_MANGA = "id,title,main_picture,mean,rank,status,num_chapters,num_volumes,start_date"
+from typing import List
+from models import Anime, Manga, Character, VoiceActor, Studio, ScheduleEntry
 
 class MALClient:
-    def __init__(self, client_id: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
-        self.client_id = client_id or os.getenv("MAL_CLIENT_ID")
-        if not self.client_id:
-            raise RuntimeError("MAL_CLIENT_ID is missing")
-        self._session = session
-        self._own_session = session is None
+    BASE_URL = "https://api.myanimelist.net/v2"
+
+    def __init__(self):
+        self._session = None
 
     async def __aenter__(self):
-        if not self._session:
-            self._session = aiohttp.ClientSession(
-                headers={"X-MAL-CLIENT-ID": self.client_id, "Accept": "application/json"}
-            )
+        self._session = aiohttp.ClientSession()
         return self
 
-    async def __aexit__(self, *exc):
-        if self._own_session and self._session:
-            await self._session.close()
+    async def __aexit__(self, exc_type, exc, tb):
+        await self._session.close()
 
-    @property
-    def session(self) -> aiohttp.ClientSession:
-        if not self._session:
-            self._session = aiohttp.ClientSession(
-                headers={"X-MAL-CLIENT-ID": self.client_id, "Accept": "application/json"}
-            )
-            self._own_session = True
-        return self._session
+    async def search_anime(self, query: str, limit: int = 15) -> List[Anime]:
+        # TODO: implement search anime logic via API
+        return []
 
-    async def _get(self, path: str, **params) -> Dict[str, Any]:
-        url = f"{BASE}{path}"
-        async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status == 429:
-                raise RuntimeError("MAL rate limited. Try again shortly.")
-            if r.status >= 400:
-                text = await r.text()
-                raise RuntimeError(f"MAL error {r.status}: {text}")
-            return await r.json()
+    async def search_manga(self, query: str, limit: int = 15) -> List[Manga]:
+        # TODO
+        return []
 
-    # ---- Search ----
-    @aiorun_cached(ttl=300)
-    async def search_anime(self, query: str, limit: int = 5) -> List[Anime]:
-        data = await self._get("/anime", q=query, limit=min(limit, 10), fields=FIELDS_ANIME)
-        return [parse_anime(n) for n in data.get("data", [])]
+    async def seasonal_anime(self, year: int, season: str) -> List[Anime]:
+        # TODO
+        return []
 
-    @aiorun_cached(ttl=300)
-    async def search_manga(self, query: str, limit: int = 5) -> List[Manga]:
-        data = await self._get("/manga", q=query, limit=min(limit, 10), fields=FIELDS_MANGA)
-        return [parse_manga(n) for n in data.get("data", [])]
+    async def top(self, kind: str = "anime", limit: int = 10) -> List:
+        # TODO: top anime/manga logic
+        return []
 
-    # ---- Rankings ----
-    @aiorun_cached(ttl=600)
-    async def top_airing_anime(self, limit: int = 5) -> List[Anime]:
-        data = await self._get("/anime/ranking", ranking_type="airing", limit=min(limit, 10), fields=FIELDS_ANIME)
-        return [parse_anime(n) for n in data.get("data", [])]
+    async def trending(self, kind: str = "anime", limit: int = 10) -> List:
+        # TODO: trending logic
+        return []
 
-    @aiorun_cached(ttl=600)
-    async def trending_anime(self, limit: int = 5) -> List[Anime]:
-        # MAL doesn't have "trending"; use "bypopularity" as a practical proxy.
-        data = await self._get("/anime/ranking", ranking_type="bypopularity", limit=min(limit, 10), fields=FIELDS_ANIME)
-        return [parse_anime(n) for n in data.get("data", [])]
+    async def recommend(self, kind: str = "anime", query: str = None) -> List:
+        # TODO: recommendations logic
+        return []
 
-    @aiorun_cached(ttl=600)
-    async def trending_manga(self, limit: int = 5) -> List[Manga]:
-        data = await self._get("/manga/ranking", ranking_type="bypopularity", limit=min(limit, 10), fields=FIELDS_MANGA)
-        return [parse_manga(n) for n in data.get("data", [])]
+    async def info(self, identifier: str, kind: str = "anime") -> object:
+        # TODO: fetch detailed info for anime/manga
+        return None
 
-    # ---- Seasonals (current airing season) ----
-    @aiorun_cached(ttl=600)
-    async def seasonal(self, year: int, season: str, limit: int = 5) -> List[Anime]:
-        # MAL seasonal endpoint:
-        data = await self._get(f"/anime/season/{year}/{season}", limit=min(limit, 10), fields=FIELDS_ANIME)
-        return [parse_anime(n) for n in data.get("data", [])]
+    async def search_character(self, query: str, limit: int = 5) -> List[Character]:
+        # TODO: character search logic
+        return []
+
+    async def search_voice_actor(self, query: str, limit: int = 5) -> List[VoiceActor]:
+        # TODO: voice actor logic
+        return []
+
+    async def search_studio(self, query: str, limit: int = 5) -> List[Studio]:
+        # TODO: studio logic
+        return []
+
+    async def schedule(self, day: str) -> ScheduleEntry:
+        # TODO: schedule logic for a given day
+        return ScheduleEntry(day=day, anime_list=[])
+
+    async def next_season(self) -> List[Anime]:
+        # TODO: logic for next season releases
+        return []

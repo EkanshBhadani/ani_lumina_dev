@@ -1,57 +1,55 @@
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, List
 
-@dataclass
 class Anime:
-    id: int
-    title: str
-    url: str
-    mean: Optional[float]
-    rank: Optional[int]
-    status: Optional[str]
-    episodes: Optional[int]
-    start_date: Optional[str]
-    picture: Optional[str]
+    def __init__(self, id: int, title: str, url: str, picture: Optional[str], mean: Optional[float], rank: Optional[int], episodes: Optional[int], start_date: Optional[str], synopsis: Optional[str]):
+        self.id = id
+        self.title = title
+        self.url = url
+        self.picture = picture
+        self.mean = mean
+        self.rank = rank
+        self.episodes = episodes
+        self.start_date = start_date
+        self.synopsis = synopsis
 
-@dataclass
 class Manga:
-    id: int
-    title: str
-    url: str
-    mean: Optional[float]
-    rank: Optional[int]
-    status: Optional[str]
-    chapters: Optional[int]
-    volumes: Optional[int]
-    start_date: Optional[str]
-    picture: Optional[str]
+    def __init__(self, id: int, title: str, url: str, picture: Optional[str], mean: Optional[float], rank: Optional[int], chapters: Optional[int], volumes: Optional[int], start_date: Optional[str], synopsis: Optional[str]):
+        self.id = id
+        self.title = title
+        self.url = url
+        self.picture = picture
+        self.mean = mean
+        self.rank = rank
+        self.chapters = chapters
+        self.volumes = volumes
+        self.start_date = start_date
+        self.synopsis = synopsis
 
-def parse_anime(node: Dict[str, Any]) -> Anime:
-    main = node.get("node", node)  # ranking endpoints wrap with {"node": {...}}
-    stats = main.get("statistics") or {}
-    return Anime(
-        id=main["id"],
-        title=main.get("title"),
-        url=main.get("main_picture", {}).get("medium") and f"https://myanimelist.net/anime/{main['id']}",
-        mean=main.get("mean"),
-        rank=main.get("rank"),
-        status=main.get("status"),
-        episodes=main.get("num_episodes"),
-        start_date=main.get("start_date"),
-        picture=(main.get("main_picture") or {}).get("medium") or (main.get("main_picture") or {}).get("large"),
-    )
+class Character:
+    def __init__(self, id: int, name: str, url: str, picture: Optional[str], anime_appearances: List[str]):
+        self.id = id
+        self.name = name
+        self.url = url
+        self.picture = picture
+        self.anime_appearances = anime_appearances
 
-def parse_manga(node: Dict[str, Any]) -> Manga:
-    main = node.get("node", node)
-    return Manga(
-        id=main["id"],
-        title=main.get("title"),
-        url=main.get("main_picture", {}).get("medium") and f"https://myanimelist.net/manga/{main['id']}",
-        mean=main.get("mean"),
-        rank=main.get("rank"),
-        status=main.get("status"),
-        chapters=main.get("num_chapters"),
-        volumes=main.get("num_volumes"),
-        start_date=main.get("start_date"),
-        picture=(main.get("main_picture") or {}).get("medium") or (main.get("main_picture") or {}).get("large"),
-    )
+class VoiceActor:
+    def __init__(self, id: int, name: str, url: str, picture: Optional[str], roles: List[str]):
+        self.id = id
+        self.name = name
+        self.url = url
+        self.picture = picture
+        self.roles = roles
+
+class Studio:
+    def __init__(self, id: int, name: str, url: str, picture: Optional[str], anime_list: List[str]):
+        self.id = id
+        self.name = name
+        self.url = url
+        self.picture = picture
+        self.anime_list = anime_list
+
+class ScheduleEntry:
+    def __init__(self, day: str, anime_list: List[Anime]):
+        self.day = day
+        self.anime_list = anime_list

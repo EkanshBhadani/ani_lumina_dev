@@ -1,3 +1,4 @@
+# bot.py
 import os
 import asyncio
 import logging
@@ -9,15 +10,9 @@ from discord.ext import commands
 
 from aiohttp import web
 
+import models  # ensure models imported
 from mal_client import MALClient
-from utils import (
-    compact_list_item_embed,
-    single_item_embed,
-    chunk_items,
-    EMBED_COLOR,
-    error_embed as util_error_embed,
-    get_current_season,
-)
+from utils import error_embed, list_embeds, item_embed, EMBED_COLOR
 
 load_dotenv()
 
@@ -26,10 +21,7 @@ if not TOKEN:
     logging.critical("DISCORD_TOKEN environment variable is missing.")
     raise SystemExit(1)
 
-GUILD_ID = os.getenv("GUILD_ID")  # optional
-
-def mal_configured() -> bool:
-    return bool(os.getenv("MAL_CLIENT_ID"))
+GUILD_ID = os.getenv("GUILD_ID")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -48,72 +40,169 @@ async def on_ready():
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} global commands.")
     except Exception as e:
-        print(f"Command sync failed: {e}")
+        print("Command sync failed:", e)
 
-@bot.tree.command(name="anime", description="Search anime on MAL")
+# --- Command definitions ---
+
+@bot.tree.command(name="anime", description="Search for an anime")
 async def anime(interaction: discord.Interaction, query: str):
-    if not mal_configured():
-        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    try:
-        async with MALClient() as mal:
-            items = await mal.search_anime(query, limit=15)
-        if not items:
-            await interaction.followup.send(embed=util_error_embed("No results found."), ephemeral=True)
+    async with MALClient() as client:
+        try:
+            results = await client.search_anime(query, limit=15)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
             return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Anime results"))
 
-        item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
-        await interaction.followup.send(embeds=item_embeds)
-    except Exception as e:
-        print("Error in /anime command:", e)
-        await interaction.followup.send(embed=util_error_embed(str(e)))
-
-@bot.tree.command(name="manga", description="Search manga on MAL")
+@bot.tree.command(name="manga", description="Search for a manga")
 async def manga(interaction: discord.Interaction, query: str):
-    if not mal_configured():
-        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    try:
-        async with MALClient() as mal:
-            items = await mal.search_manga(query, limit=15)
-        if not items:
-            await interaction.followup.send(embed=util_error_embed("No results found."), ephemeral=True)
+    async with MALClient() as client:
+        try:
+            results = await client.search_manga(query, limit=15)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
             return
-
-        item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
-        await interaction.followup.send(embeds=item_embeds)
-    except Exception as e:
-        print("Error in /manga command:", e)
-        await interaction.followup.send(embed=util_error_embed(str(e)))
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Manga results"))
 
 @bot.tree.command(name="season", description="Get current anime season list")
 async def season(interaction: discord.Interaction):
-    if not mal_configured():
-        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    try:
-        year, season_name = get_current_season()
-        async with MALClient() as mal:
-            items = await mal.seasonal_anime(year, season_name)
-        if not items:
-            await interaction.followup.send(embed=util_error_embed("No seasonal anime found."), ephemeral=True)
+    async with MALClient() as client:
+        try:
+            year, season_name = models.get_current_season()  # if you moved this to models
+            results = await client.seasonal_anime(year, season_name)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
             return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title=f"Season {season_name} {year}"))
 
-        item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
-        await interaction.followup.send(embeds=item_embeds)
-    except Exception as e:
-        print("Error in /season command:", e)
-        await interaction.followup.send(embed=util_error_embed(str(e)))
+@bot.tree.command(name="top", description="Get top ranked anime or manga")
+async def top(interaction: discord.Interaction, kind: str = "anime", limit: int = 10):
+    async with MALClient() as client:
+        try:
+            results = await client.top(kind=kind, limit=limit)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title=f"Top {kind.capitalize()}"))
 
-# Add more commands here as needed
-# e.g. /trending, /top, /recommend etc.
+@bot.tree.command(name="trending", description="Get trending anime or manga")
+async def trending(interaction: discord.Interaction, kind: str = "anime", limit: int = 10):
+    async with MALClient() as client:
+        try:
+            results = await client.trending(kind=kind, limit=limit)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title=f"Trending {kind.capitalize()}"))
 
+@bot.tree.command(name="recommend", description="Get recommendations for anime or manga")
+async def recommend(interaction: discord.Interaction, kind: str = "anime", query: Optional[str] = None):
+    async with MALClient() as client:
+        try:
+            results = await client.recommend(kind=kind, query=query)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No results found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title=f"Recommendations for {kind.capitalize()}"))
+
+@bot.tree.command(name="info", description="Get detailed info for an anime or manga")
+async def info(interaction: discord.Interaction, identifier: str, kind: str = "anime"):
+    async with MALClient() as client:
+        try:
+            details = await client.info(kind=kind, identifier=identifier)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not details:
+        await interaction.response.send_message(embed=error_embed("No details found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embed=item_embed(details))
+
+@bot.tree.command(name="character", description="Search for a character")
+async def character(interaction: discord.Interaction, query: str, limit: int = 5):
+    async with MALClient() as client:
+        try:
+            results = await client.search_character(query, limit=limit)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No character found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Character Results"))
+
+@bot.tree.command(name="voiceactor", description="Search for a voice actor (seiyuu)")
+async def voiceactor(interaction: discord.Interaction, query: str, limit: int = 5):
+    async with MALClient() as client:
+        try:
+            results = await client.search_voice_actor(query, limit=limit)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No voice actor found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Voice Actor Results"))
+
+@bot.tree.command(name="studio", description="Search for an anime studio / production house")
+async def studio(interaction: discord.Interaction, query: str, limit: int = 5):
+    async with MALClient() as client:
+        try:
+            results = await client.search_studio(query, limit=limit)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No studio found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Studio Results"))
+
+@bot.tree.command(name="schedule", description="Get anime airing schedule for a day")
+async def schedule(interaction: discord.Interaction, day: Optional[str] = None):
+    async with MALClient() as client:
+        try:
+            target_day = day if day else "today"
+            schedule = await client.schedule(target_day)
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not schedule.anime_list:
+        await interaction.response.send_message(embed=error_embed("No schedule found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(schedule.anime_list, title=f"Schedule for {schedule.day}"))
+
+@bot.tree.command(name="nextseason", description="List anime releases for next season")
+async def nextseason(interaction: discord.Interaction):
+    async with MALClient() as client:
+        try:
+            results = await client.next_season()
+        except Exception as e:
+            await interaction.response.send_message(embed=error_embed(str(e)), ephemeral=True)
+            return
+    if not results:
+        await interaction.response.send_message(embed=error_embed("No upcoming releases found"), ephemeral=True)
+        return
+    await interaction.response.send_message(embeds=list_embeds(results, title="Next Season Releases"))
+
+# — health server for readiness
 async def health(_request):
     return web.Response(text="ok")
 
@@ -124,7 +213,7 @@ async def start_web_app(host: str = "0.0.0.0", port: int = 8080):
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-    print(f"Health server started on http://{host}:{port}")
+    print(f"Health server started at http://{host}:{port}")
 
 async def main():
     port = int(os.getenv("PORT", "8080"))
