@@ -1,4 +1,3 @@
-# bot.py
 import os
 import asyncio
 import logging
@@ -8,43 +7,97 @@ import discord
 from discord.ext import commands
 from aiohttp import web
 
-# load .env for local dev; Render uses environment variables
+from mal_client import MALClient
+from utils import anime_embed, get_current_season
+
+# load for local; on Render, env vars are injected
 load_dotenv()
 
-# ---- Config / env ----
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     logging.critical("DISCORD_TOKEN environment variable is missing.")
     raise SystemExit(1)
 
-# Optional MAL keys (if used elsewhere)
-MAL_CLIENT_ID = os.getenv("MAL_CLIENT_ID")
-MAL_CLIENT_SECRET = os.getenv("MAL_CLIENT_SECRET")
-
-# ---- Intents ----
 intents = discord.Intents.default()
-# Enable only what you need:
+# enable only what you need; Message Content is ON in Dev Portal per your setup
 intents.message_content = True
 
-# ---- Bot setup ----
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
+# --------- BOT EVENTS ----------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+    # try syncing slash commands (safe to call; if already synced this is quick)
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} application commands.")
+    except Exception as e:
+        print(f"Command sync failed: {e}")
 
+# --------- SLASH COMMANDS ----------
+@bot.tree.command(name="anime", description="Search anime on MAL")
+async def anime(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+    try:
+        async with MALClient() as mal:
+            items = await mal.search_anime(query, limit=5)
+        rows = [item.__dict__ for item in items]
+        await interaction.followup.send(embed=anime_embed(f"Results for “{query}”", rows))
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
 
-# Example application-command (slash) — replace / add your commands
-@bot.tree.command(name="ping", description="Check bot latency")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)} ms")
+@bot.tree.command(name="manga", description="Search manga on MAL")
+async def manga(interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+    try:
+        async with MALClient() as mal:
+            items = await mal.search_manga(query, limit=5)
+        rows = [item.__dict__ for item in items]
+        await interaction.followup.send(embed=anime_embed(f"Manga results for “{query}”", rows, kind="manga"))
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
 
+@bot.tree.command(name="airing", description="Top airing anime (MAL ranking)")
+async def airing(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        async with MALClient() as mal:
+            items = await mal.top_airing_anime(limit=5)
+        rows = [i.__dict__ for i in items]
+        await interaction.followup.send(embed=anime_embed("Top Airing Anime", rows))
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
 
-# ---- Small aiohttp health server ----
-async def health(request):
+@bot.tree.command(name="trending", description="Trending anime (by popularity)")
+async def trending(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        async with MALClient() as mal:
+            items = await mal.trending_anime(limit=5)
+        rows = [i.__dict__ for i in items]
+        await interaction.followup.send(embed=anime_embed("Trending Anime (Popularity)", rows))
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+
+@bot.tree.command(name="seasonal", description="Current season picks (MAL seasonal)")
+async def seasonal(interaction: discord.Interaction, year: int = 0, season: str = ""):
+    await interaction.response.defer()
+    try:
+        if not year or not season:
+            y, s = get_current_season()
+        else:
+            y, s = year, season.lower()
+        async with MALClient() as mal:
+            items = await mal.seasonal(y, s, limit=5)
+        rows = [i.__dict__ for i in items]
+        await interaction.followup.send(embed=anime_embed(f"{s.title()} {y} — Seasonal", rows))
+    except Exception as e:
+        await interaction.followup.send(f"❌ {e}")
+
+# --------- HEALTH SERVER (for Render Web Service) ----------
+async def health(_request):
     return web.Response(text="ok")
-
 
 async def start_web_app(host: str = "0.0.0.0", port: int = 8080):
     app = web.Application()
@@ -55,37 +108,15 @@ async def start_web_app(host: str = "0.0.0.0", port: int = 8080):
     await site.start()
     print(f"Health server started on http://{host}:{port}")
 
-
-# ---- Main async runner that runs web + bot concurrently ----
 async def main():
-    # Render sets PORT env var for web services; fallback to 8080 if not present
-    port_str = os.getenv("PORT")
-    if port_str:
-        try:
-            port = int(port_str)
-        except ValueError:
-            port = 8080
-    else:
-        port = 8080
-
-    # Start health server and bot concurrently
+    port = int(os.getenv("PORT", "8080"))
     web_task = asyncio.create_task(start_web_app(port=port))
-    # Use bot.start instead of bot.run to run inside this loop
     bot_task = asyncio.create_task(bot.start(TOKEN))
-
-    done, pending = await asyncio.wait(
-        [web_task, bot_task], return_when=asyncio.FIRST_EXCEPTION
-    )
-
-    # cancel other tasks if one fails
-    for task in pending:
-        task.cancel()
-
-    # propagate exceptions if any
-    for task in done:
-        if task.exception():
-            raise task.exception()
-
+    done, pending = await asyncio.wait([web_task, bot_task], return_when=asyncio.FIRST_EXCEPTION)
+    for t in pending: t.cancel()
+    for t in done:
+        if t.exception():
+            raise t.exception()
 
 if __name__ == "__main__":
     try:
