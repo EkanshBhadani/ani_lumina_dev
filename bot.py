@@ -3,6 +3,7 @@ import os
 import asyncio
 import logging
 from dotenv import load_dotenv
+from typing import Optional
 
 import discord
 from discord.ext import commands
@@ -52,86 +53,106 @@ async def on_ready():
     except Exception as e:
         print(f"Command sync failed: {e}")
 
-# ----- Pagination View -----
+# ----- Robust Paginator View -----
 class PaginatorView(discord.ui.View):
-    def __init__(self, pages: list, author_id: int, timeout: int = 120):
+    def __init__(self, pages: list, author_id: int, header: discord.Embed, timeout: int = 120):
         """
         pages: list of lists of embeds (each inner list contains up to per_page embeds)
         author_id: the user who can interact
+        header: header embed to show on every page (kept as first embed)
         """
         super().__init__(timeout=timeout)
         self.pages = pages
         self.author_id = author_id
         self.current = 0
+        self.header = header
+        self.message: Optional[discord.Message] = None
 
-    async def _update_message(self, interaction: discord.Interaction):
-        embeds = self.pages[self.current]
-        footer_text = f"Page {self.current+1}/{len(self.pages)}"
-        for e in embeds:
-            # append page info in footer (if exists keep existing text)
-            existing = e.footer.text if e.footer and e.footer.text else ""
-            e.set_footer(text=f"{existing} • {footer_text}".strip(" • "))
-        # use response.edit_message to properly acknowledge the interaction
-        await interaction.response.edit_message(embeds=embeds, view=self)
+    def _page_embeds(self, page_index: int):
+        """
+        Build full embed list for a page: header (with updated footer) + the page's item embeds.
+        Returns list[discord.Embed]
+        """
+        page_count = len(self.pages)
+        header_copy = discord.Embed.from_dict(self.header.to_dict())
+        header_footer_text = header_copy.footer.text or ""
+        header_copy.set_footer(text=f"{header_footer_text} • Page {page_index+1}/{page_count}".strip(" • "))
+        embeds = [header_copy]
+        embeds.extend(self.pages[page_index])
+        return embeds
 
     async def _deny_control(self, interaction: discord.Interaction):
-        # used when a non-author tries to use controls
-        # respond promptly so Discord does not show "This interaction failed"
+        # reply ephemeral to non-author trying to control pagination
         try:
             await interaction.response.send_message("You can't control this pagination session.", ephemeral=True)
         except Exception:
-            # ignore if it's already responded somehow
+            # if already responded, ignore
             pass
 
     async def _is_author(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
+    async def _edit_message(self, interaction: discord.Interaction, page_index: int):
+        """
+        Safely acknowledge the interaction and edit the message attached to this view.
+        Uses defer(update=True) and edits stored message for reliability.
+        """
+        new_embeds = self._page_embeds(page_index)
+        # Acknowledge that we will update the original message
+        try:
+            await interaction.response.defer(update=True)
+        except Exception:
+            # possibly already acknowledged; continue
+            pass
+
+        # Try to edit the stored message (preferred)
+        try:
+            if self.message:
+                await self.message.edit(embeds=new_embeds, view=self)
+            else:
+                # fallback to editing the interaction message
+                await interaction.message.edit(embeds=new_embeds, view=self)
+        except Exception as exc:
+            # Try using edit_message on response (rare path)
+            try:
+                await interaction.response.edit_message(embeds=new_embeds, view=self)
+            except Exception as exc2:
+                # Log both exceptions to stdout (visible in your service logs)
+                print("Failed to edit message using all methods:", exc, exc2)
+                # Attempt to send ephemeral error so user sees something and interaction is acknowledged
+                try:
+                    await interaction.followup.send("Failed to update page — check logs.", ephemeral=True)
+                except Exception:
+                    pass
+
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
     async def prev(self, button: discord.ui.Button, interaction: discord.Interaction):
-        # check auth
+        # Only the author can change page (change logic here if you want to allow others)
         if not await self._is_author(interaction):
             await self._deny_control(interaction)
             return
-        try:
-            if self.current > 0:
-                self.current -= 1
-            await self._update_message(interaction)
-        except Exception as exc:
-            # guarantee we respond so the interaction doesn't fail
-            try:
-                await interaction.response.send_message(f"Error updating page: {exc}", ephemeral=True)
-            except Exception:
-                # fallback: try editing the message directly
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
+        if self.current > 0:
+            self.current -= 1
+        await self._edit_message(interaction, self.current)
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next(self, button: discord.ui.Button, interaction: discord.Interaction):
         if not await self._is_author(interaction):
             await self._deny_control(interaction)
             return
-        try:
-            if self.current < len(self.pages) - 1:
-                self.current += 1
-            await self._update_message(interaction)
-        except Exception as exc:
-            try:
-                await interaction.response.send_message(f"Error updating page: {exc}", ephemeral=True)
-            except Exception:
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
+        if self.current < len(self.pages) - 1:
+            self.current += 1
+        await self._edit_message(interaction, self.current)
 
     async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        # try to edit the original message to disable buttons (best effort)
-        # We don't have the original interaction here; if you need deterministic disabling,
-        # store message reference when sending and use it to edit after timeout.
-        return
+        # disable buttons on timeout (best-effort)
+        for child in self.children:
+            child.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
 # ----- Commands -----
 @bot.tree.command(name="anime", description="Search anime on MAL (paged results)")
@@ -149,21 +170,37 @@ async def anime(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=util_error_embed("No results found."), ephemeral=True)
             return
 
+        # Build item embeds (compact) — each embed should include the item's image in the embed.thumbnail
         item_embeds = []
         for idx, item in enumerate(items, 1):
             embed = compact_list_item_embed(item, idx)
             item_embeds.append(embed)
 
-        pages_of_embeds = chunk_items(item_embeds, 5)
-        view = PaginatorView(pages=pages_of_embeds, author_id=interaction.user.id, timeout=120)
-
-        header = discord.Embed(title=f"Results for “{query}”", description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})", color=EMBED_COLOR)
-        header.set_thumbnail(url=getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None))
+        pages_of_embeds = chunk_items(item_embeds, 5)  # pages of lists of embeds (5 per page max)
+        # header embed (kept as the top embed on every page)
+        header = discord.Embed(
+            title=f"Results for “{query}”",
+            description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})",
+            color=EMBED_COLOR,
+        )
+        # try to set thumbnail from the first item
+        try:
+            first_pic = getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None)
+            if first_pic:
+                header.set_thumbnail(url=first_pic)
+        except Exception:
+            pass
         header.set_footer(text=f"Data from MyAnimeList • Page 1/{len(pages_of_embeds)}")
 
-        to_send = [header] + pages_of_embeds[0]
-        await interaction.followup.send(embeds=to_send, view=view)
+        view = PaginatorView(pages=pages_of_embeds, author_id=interaction.user.id, header=header, timeout=120)
+
+        # send first page (header + page0) and store message reference on the view
+        to_send = view._page_embeds(0)
+        msg = await interaction.followup.send(embeds=to_send, view=view)
+        view.message = msg
+
     except Exception as e:
+        print("Error in /anime command:", e)
         await interaction.followup.send(embed=util_error_embed(str(e)))
 
 @bot.tree.command(name="manga", description="Search manga on MAL (paged results)")
@@ -186,15 +223,26 @@ async def manga(interaction: discord.Interaction, query: str):
             item_embeds.append(embed)
 
         pages_of_embeds = chunk_items(item_embeds, 5)
-        view = PaginatorView(pages=pages_of_embeds, author_id=interaction.user.id, timeout=120)
-
-        header = discord.Embed(title=f"Manga results for “{query}”", description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})", color=EMBED_COLOR)
-        header.set_thumbnail(url=getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None))
+        header = discord.Embed(
+            title=f"Manga results for “{query}”",
+            description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})",
+            color=EMBED_COLOR,
+        )
+        try:
+            first_pic = getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None)
+            if first_pic:
+                header.set_thumbnail(url=first_pic)
+        except Exception:
+            pass
         header.set_footer(text=f"Data from MyAnimeList • Page 1/{len(pages_of_embeds)}")
 
-        to_send = [header] + pages_of_embeds[0]
-        await interaction.followup.send(embeds=to_send, view=view)
+        view = PaginatorView(pages=pages_of_embeds, author_id=interaction.user.id, header=header, timeout=120)
+        to_send = view._page_embeds(0)
+        msg = await interaction.followup.send(embeds=to_send, view=view)
+        view.message = msg
+
     except Exception as e:
+        print("Error in /manga command:", e)
         await interaction.followup.send(embed=util_error_embed(str(e)))
 
 # ------ health server for Render ------
