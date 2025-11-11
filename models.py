@@ -1,55 +1,43 @@
-from typing import Optional, List
+from datetime import datetime
+from typing import Tuple
 
-class Anime:
-    def __init__(self, id: int, title: str, url: str, picture: Optional[str], mean: Optional[float], rank: Optional[int], episodes: Optional[int], start_date: Optional[str], synopsis: Optional[str]):
-        self.id = id
-        self.title = title
-        self.url = url
-        self.picture = picture
-        self.mean = mean
-        self.rank = rank
-        self.episodes = episodes
-        self.start_date = start_date
-        self.synopsis = synopsis
+def _month_to_season(month: int) -> str:
+    # seasons: winter(Jan-Mar), spring(Apr-Jun), summer(Jul-Sep), fall(Oct-Dec)
+    if month in (12, 1, 2):
+        return "winter"
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    return "fall"
 
-class Manga:
-    def __init__(self, id: int, title: str, url: str, picture: Optional[str], mean: Optional[float], rank: Optional[int], chapters: Optional[int], volumes: Optional[int], start_date: Optional[str], synopsis: Optional[str]):
-        self.id = id
-        self.title = title
-        self.url = url
-        self.picture = picture
-        self.mean = mean
-        self.rank = rank
-        self.chapters = chapters
-        self.volumes = volumes
-        self.start_date = start_date
-        self.synopsis = synopsis
+def get_current_season(now: datetime = None) -> Tuple[int, str]:
+    now = now or datetime.utcnow()
+    month = now.month
+    season = _month_to_season(month)
+    year = now.year
+    # If it's December and it's winter mapping to next year, keep year+1 for winter if desired.
+    # Most MAL seasonal endpoints use year+season where winter is the year (e.g., winter 2025 is Jan-Mar 2025)
+    # So we will not bump year for December in this implementation.
+    return year, season
 
-class Character:
-    def __init__(self, id: int, name: str, url: str, picture: Optional[str], anime_appearances: List[str]):
-        self.id = id
-        self.name = name
-        self.url = url
-        self.picture = picture
-        self.anime_appearances = anime_appearances
-
-class VoiceActor:
-    def __init__(self, id: int, name: str, url: str, picture: Optional[str], roles: List[str]):
-        self.id = id
-        self.name = name
-        self.url = url
-        self.picture = picture
-        self.roles = roles
-
-class Studio:
-    def __init__(self, id: int, name: str, url: str, picture: Optional[str], anime_list: List[str]):
-        self.id = id
-        self.name = name
-        self.url = url
-        self.picture = picture
-        self.anime_list = anime_list
-
-class ScheduleEntry:
-    def __init__(self, day: str, anime_list: List[Anime]):
-        self.day = day
-        self.anime_list = anime_list
+def get_next_season(now: datetime = None) -> Tuple[int, str]:
+    now = now or datetime.utcnow()
+    month = now.month
+    year = now.year
+    # determine next season by month
+    if month in (12, 1, 2):
+        # currently winter -> next is spring
+        next_season = "spring"
+        if month == 12:
+            # December -> next season's year may be next year for some interpretations; keep same year for simplicity
+            year = year + 1 if month == 12 else year
+    elif month in (3, 4, 5):
+        next_season = "summer"
+    elif month in (6, 7, 8):
+        next_season = "fall"
+    else:
+        next_season = "winter"
+        if month >= 10:
+            year = year + 1
+    return year, next_season

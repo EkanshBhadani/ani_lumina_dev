@@ -1,215 +1,194 @@
-# mal_client.py
 import os
+import asyncio
+from typing import Any, Dict, List, Optional, Tuple, Union
 import aiohttp
-from typing import List, Optional, Union
-from models import Anime, Manga, Character, VoiceActor, Studio, ScheduleEntry
+from cache import AsyncTTLCache
+from models import get_current_season, get_next_season
+
+API_BASE_DEFAULT = "https://api.myanimelist.net/v2"
+# fields commonly useful
+COMMON_FIELDS = "id,title,main_picture,mean,rank,media_type,status,num_episodes,start_date"
 
 class MALClient:
-    BASE_URL = "https://api.myanimelist.net/v2"
-    CLIENT_ID = os.getenv("7e437c417001602f040b6dd6dc7ea768")
-    # Note: For public info endpoints, MAL documentation states you pass X-MAL-CLIENT-ID header. :contentReference[oaicite:1]{index=1}
-
-    def __init__(self):
+    def __init__(self, client_id: Optional[str] = None, base_url: Optional[str] = None, cache_ttl: int = 60):
+        # If you didn't pass client_id, it will try from env
+        # 👉 Add your MAL Client ID in your .env as MAL_CLIENT_ID
+        self.client_id = client_id or os.getenv("7e437c417001602f040b6dd6dc7ea768")
+        self.base_url = base_url or os.getenv("API_BASE", API_BASE_DEFAULT).rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
+        self._cache = AsyncTTLCache(default_ttl=cache_ttl)
+        self._lock = asyncio.Lock()
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession(
-            headers={"X-MAL-CLIENT-ID": self.CLIENT_ID}
-        )
+        if not self._session:
+            headers = {}
+            if self.client_id:
+                headers["X-MAL-CLIENT-ID"] = self.client_id
+            self._session = aiohttp.ClientSession(headers=headers)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         if self._session:
             await self._session.close()
+            self._session = None
 
-    async def search_anime(self, query: str, limit: int = 15) -> List[Anime]:
-        url = f"{self.BASE_URL}/anime?q={query}&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[Anime] = []
-        for item in items:
-            node = item.get("node", item)  # check if node wrapper present
-            anime = Anime(
-                id=node.get("id"),
-                title=node.get("title"),
-                url=node.get("url"),
-                picture=node.get("main_picture", {}).get("medium"),
-                mean=node.get("mean"),
-                rank=node.get("rank"),
-                episodes=node.get("num_episodes"),
-                start_date=node.get("start_season", {}).get("year"),
-                synopsis=node.get("synopsis")
-            )
-            results.append(anime)
-        return results
+    async def _get(self, path: str, params: Optional[Dict[str, str]] = None) -> Any:
+        url = f"{self.base_url}{path}"
+        cache_key = f"GET:{url}:{params}"
+        cached = await self._cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-    async def search_manga(self, query: str, limit: int = 15) -> List[Manga]:
-        url = f"{self.BASE_URL}/manga?q={query}&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[Manga] = []
-        for item in items:
-            node = item.get("node", item)
-            manga = Manga(
-                id=node.get("id"),
-                title=node.get("title"),
-                url=node.get("url"),
-                picture=node.get("main_picture", {}).get("medium"),
-                mean=node.get("mean"),
-                rank=node.get("rank"),
-                chapters=node.get("num_chapters"),
-                volumes=node.get("num_volumes"),
-                start_date=node.get("published", {}).get("start"),
-                synopsis=node.get("synopsis")
-            )
-            results.append(manga)
-        return results
+        if not self._session:
+            headers = {}
+            if self.client_id:
+                headers["X-MAL-CLIENT-ID"] = self.client_id
+            self._session = aiohttp.ClientSession(headers=headers)
 
-    async def info(self, kind: str, identifier: Union[int,str]) -> Union[Anime, Manga]:
+        async with self._lock:
+            async with self._session.get(url, params=params, timeout=20) as resp:
+                # handle non-200
+                if resp.status == 200:
+                    data = await resp.json()
+                    await self._cache.set(cache_key, data)
+                    return data
+                elif resp.status == 204:
+                    return None
+                else:
+                    text = await resp.text()
+                    raise aiohttp.ClientResponseError(
+                        request_info=resp.request_info,
+                        history=resp.history,
+                        status=resp.status,
+                        message=f"Bad response ({resp.status}): {text}",
+                        headers=resp.headers,
+                    )
+
+    # generic search for anime/manga
+    async def search(self, kind: str, query: str, limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
         """
-        kind: "anime" or "manga"
-        identifier: ID or slug of item
+        kind: 'anime' or 'manga' or 'character' etc.
+        returns raw JSON from MAL v2 search endpoint.
         """
-        url = f"{self.BASE_URL}/{kind}/{identifier}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        node = data.get("data", {}).get("node", data.get("data", {}))
-        if kind == "anime":
-            return Anime(
-                id=node.get("id"),
-                title=node.get("title"),
-                url=node.get("url"),
-                picture=node.get("main_picture", {}).get("medium"),
-                mean=node.get("mean"),
-                rank=node.get("rank"),
-                episodes=node.get("num_episodes"),
-                start_date=node.get("start_season", {}).get("year"),
-                synopsis=node.get("synopsis")
-            )
+        path = f"/{kind}"
+        params = {"q": query, "limit": str(limit), "offset": str(offset), "fields": fields}
+        return await self._get(path, params=params)
+
+    async def search_anime(self, query: str, limit: int = 15, offset: int = 0) -> Dict[str, Any]:
+        return await self.search("anime", query, limit=limit, offset=offset)
+
+    async def search_manga(self, query: str, limit: int = 15, offset: int = 0) -> Dict[str, Any]:
+        return await self.search("manga", query, limit=limit, offset=offset)
+
+    async def search_character(self, query: str, limit: int = 15, offset: int = 0) -> Dict[str, Any]:
+        return await self.search("characters", query, limit=limit, offset=offset, fields="id,name,character_name,about,main_picture")
+
+    async def search_people(self, query: str, limit: int = 15, offset: int = 0) -> Dict[str, Any]:
+        # people endpoint (voice actors)
+        return await self.search("people", query, limit=limit, offset=offset, fields="id,name,main_picture")
+
+    async def search_studio(self, query: str, limit: int = 15, offset: int = 0) -> Dict[str, Any]:
+        # studios are available as 'producers' endpoint in some APIs, MAL v2 uses 'producers' or 'studios' depending
+        # We'll try producers first
+        return await self.search("producers", query, limit=limit, offset=offset, fields="id,name")
+
+    async def info(self, identifier: Union[int, str], kind: str = "anime", fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        """
+        Fetch detailed info for an item.
+        identifier: either numeric id or name (string). If string is not numeric, we do a search and return first match's full details.
+        kind: 'anime' or 'manga' or 'characters' etc.
+        """
+        # If identifier looks like an id (int), fetch details by id
+        if isinstance(identifier, int) or (isinstance(identifier, str) and identifier.isdigit()):
+            item_id = int(identifier)
+            path = f"/{kind}/{item_id}"
+            params = {"fields": fields}
+            return await self._get(path, params=params)
+
+        # otherwise search and return first match's details
+        search_res = await self.search(kind, identifier, limit=1, fields=fields)
+        if not search_res:
+            return {}
+        if isinstance(search_res, dict) and search_res.get("data"):
+            first = search_res["data"][0]
+            # data item often contains node with id and more fields
+            node = first.get("node") or first.get("id") and first  # fallback
+            # MAL v2 search returns nodes where id is inside .node.id for some endpoints.
+            item_id = None
+            if isinstance(node, dict):
+                item_id = node.get("id") or node.get("node", {}).get("id")
+            else:
+                # sometimes search result top-level contains id
+                item_id = first.get("id")
+            if item_id:
+                return await self.info(item_id, kind=kind, fields=fields)
+        return {}
+
+    async def seasonal(self, year: int, season: str, limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        """
+        season: winter, spring, summer, fall (lowercase)
+        """
+        path = f"/anime/season/{year}/{season}"
+        params = {"limit": str(limit), "offset": str(offset), "fields": fields}
+        return await self._get(path, params=params)
+
+    async def current_season(self, limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        year, season = get_current_season()
+        return await self.seasonal(year, season, limit=limit, offset=offset, fields=fields)
+
+    async def next_season(self, limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        year, season = get_next_season()
+        return await self.seasonal(year, season, limit=limit, offset=offset, fields=fields)
+
+    async def top(self, kind: str = "anime", limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        path = f"/{kind}/ranking"
+        params = {"limit": str(limit), "offset": str(offset), "fields": fields}
+        return await self._get(path, params=params)
+
+    async def trending(self, kind: str = "anime", limit: int = 15, offset: int = 0, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        # MAL doesn't have a single 'trending' v2 endpoint publicly documented; many use ranking by popularity
+        # We'll attempt ranking by popularity (ranking_type=popularity)
+        path = f"/{kind}/ranking"
+        params = {"limit": str(limit), "offset": str(offset), "ranking_type": "popularity", "fields": fields}
+        return await self._get(path, params=params)
+
+    async def schedule(self, day: Optional[str] = None, limit: int = 50, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        """
+        MAL v2 does not expose a simple schedule endpoint the same way. If you have schedule info, you might
+        use seasonal endpoints or other endpoints. This method will fallback to seasonal data and filter by day if possible.
+        day: 'monday', 'tuesday', ... or None for whole season
+        """
+        year, season = get_current_season()
+        season_data = await self.seasonal(year, season, limit=limit, fields=fields)
+        # schedule filtering is best-effort by looking at 'start_date' or 'broadcast' keys if available in fields
+        if not day:
+            return season_data
+        day_low = day.lower()
+        # filter items with "broadcast" or "aired" info - best effort
+        filtered = {"data": []}
+        for item in season_data.get("data", []):
+            # some items may have 'node' or direct
+            info = item.get("node") or item
+            # Check for broadcast or start_date - MAL's v2 seasonal usually doesn't include weekday; so this is best-effort.
+            # Here, just include everything (since accurate schedule requires another source)
+            filtered["data"].append(item)
+        return filtered
+
+    async def recommend(self, kind: str = "anime", id_or_name: Union[int, str] = None, limit: int = 10, fields: str = COMMON_FIELDS) -> Dict[str, Any]:
+        """
+        MAL v2 recommendations endpoint is /anime/{id}/recommendations -- if you have an id, use that.
+        If only name provided, will try to resolve to id and then fetch recommendations.
+        """
+        item = None
+        if id_or_name is None:
+            return {}
+        if isinstance(id_or_name, str) and not id_or_name.isdigit():
+            resolved = await self.info(id_or_name, kind=kind, fields="id")
+            item_id = resolved.get("id") if isinstance(resolved, dict) else None
         else:
-            return Manga(
-                id=node.get("id"),
-                title=node.get("title"),
-                url=node.get("url"),
-                picture=node.get("main_picture", {}).get("medium"),
-                mean=node.get("mean"),
-                rank=node.get("rank"),
-                chapters=node.get("num_chapters"),
-                volumes=node.get("num_volumes"),
-                start_date=node.get("published", {}).get("start"),
-                synopsis=node.get("synopsis")
-            )
-
-    # Stub methods for other features — you’ll need to flesh these out similarly:
-    async def top(self, kind: str = "anime", limit: int = 10) -> List:
-        # Implementation will likely call: /{kind}/ranking
-        url = f"{self.BASE_URL}/{kind}/ranking?ranking_type=all&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        # Map items into Anime/Manga accordingly
-        return []  # placeholder
-
-    async def trending(self, kind: str = "anime", limit: int = 10) -> List:
-        # Implementation will likely call: /{kind}/ranking?ranking_type=favorite or similar
-        url = f"{self.BASE_URL}/{kind}/ranking?ranking_type=favorite&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        return []  # placeholder
-
-    async def seasonal_anime(self, year: int, season: str) -> List[Anime]:
-        url = f"{self.BASE_URL}/anime/season/{year}/{season}?limit=15"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[Anime] = []
-        for it in items:
-            node = it.get("node", it)
-            anime = Anime(
-                id=node.get("id"),
-                title=node.get("title"),
-                url=node.get("url"),
-                picture=node.get("main_picture", {}).get("medium"),
-                mean=node.get("mean"),
-                rank=node.get("rank"),
-                episodes=node.get("num_episodes"),
-                start_date=node.get("start_season", {}).get("year"),
-                synopsis=node.get("synopsis")
-            )
-            results.append(anime)
-        return results
-
-    async def search_character(self, query: str, limit: int = 5) -> List[Character]:
-        url = f"{self.BASE_URL}/characters?q={query}&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[Character] = []
-        for item in items:
-            node = item.get("node", item)
-            character = Character(
-                id=node.get("id"),
-                name=node.get("name"),
-                url=node.get("url"),
-                picture=node.get("images", {}).get("jpg", {}).get("image_url"),
-                anime_appearances=[anime.get("name") for anime in node.get("anime", [])]
-            )
-            results.append(character)
-        return results
-
-    async def search_voice_actor(self, query: str, limit: int = 5) -> List[VoiceActor]:
-        url = f"{self.BASE_URL}/people?q={query}&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[VoiceActor] = []
-        for item in items:
-            node = item.get("node", item)
-            va = VoiceActor(
-                id=node.get("id"),
-                name=node.get("name"),
-                url=node.get("url"),
-                picture=node.get("images", {}).get("jpg", {}).get("image_url"),
-                roles=[role.get("role") for role in node.get("voice_acting_roles", [])]
-            )
-            results.append(va)
-        return results
-
-    async def search_studio(self, query: str, limit: int = 5) -> List[Studio]:
-        url = f"{self.BASE_URL}/producers?q={query}&limit={limit}"
-        async with self._session.get(url) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-        items = data.get("data", [])
-        results: List[Studio] = []
-        for item in items:
-            node = item.get("node", item)
-            studio = Studio(
-                id=node.get("id"),
-                name=node.get("name"),
-                url=node.get("url"),
-                picture=None,
-                anime_list=[anime.get("name") for anime in node.get("anime", [])]
-            )
-            results.append(studio)
-        return results
-
-    async def schedule(self, day: str) -> ScheduleEntry:
-        # MAL v2 may not directly support day-based schedule endpoint publicly; this may require external logic or different endpoint
-        # Here’s a placeholder:
-        return ScheduleEntry(day=day, anime_list=[])
-
-    async def next_season(self) -> List[Anime]:
-        # Placeholder: determine next season year/season_word then call seasonal endpoint
-        return []
+            item_id = int(id_or_name)
+        if not item_id:
+            return {}
+        path = f"/{kind}/{item_id}/recommendations"
+        params = {"limit": str(limit), "fields": fields}
+        return await self._get(path, params=params)
