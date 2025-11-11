@@ -125,7 +125,6 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     if lines:
         embed.description = "\n".join(lines)
 
-@@ -96,3 +125,32 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     tz = pytz.timezone("Asia/Kolkata")
     embed.set_footer(text=f"Data from MyAnimeList • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
     return embed
