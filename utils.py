@@ -1,10 +1,10 @@
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence, Tuple, List
 import discord
 from datetime import datetime
 import pytz
 
 # Visual theming
-EMBED_COLOR = 0x1F8B4C  # change to any hex to change the colors
+EMBED_COLOR = 0x1F8B4C  # change if you want
 ERROR_COLOR = 0xE74C3C
 
 def truncate(s: Optional[str], n: int = 256) -> str:
@@ -14,23 +14,16 @@ def truncate(s: Optional[str], n: int = 256) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 def _format_meta(obj: dict) -> str:
-    """Build a compact meta line from available fields."""
     parts = []
-    # handle both dict-like and attr objects
-    get = lambda k: obj.get(k) if isinstance(obj, dict) else getattr(obj, k, None)
-
-    mean = get("mean")
-    rank = get("rank")
-    episodes = get("episodes")
-    chapters = get("chapters")
-    volumes = get("volumes")
-    status = get("status")
+    mean = obj.get("mean")
+    rank = obj.get("rank")
+    episodes = obj.get("episodes")
+    chapters = obj.get("chapters")
+    volumes = obj.get("volumes")
+    status = obj.get("status")
 
     if mean is not None:
-        try:
-            parts.append(f"⭐ {mean}")
-        except Exception:
-            parts.append(f"⭐ {truncate(mean)}")
+        parts.append(f"⭐ {mean}")
     if rank:
         parts.append(f"#{rank}")
     if episodes:
@@ -43,25 +36,28 @@ def _format_meta(obj: dict) -> str:
         parts.append(str(status).capitalize())
     return " • ".join(parts) if parts else "—"
 
+def get_footer_time() -> str:
+    tz = pytz.timezone("Asia/Kolkata")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
+
 def anime_embed_from_models(title: str, items: Sequence, kind: str = "anime") -> discord.Embed:
     """
-    Build a clean embed listing multiple Anime/Manga items.
-    items: sequence of objects with attributes: title, url, mean, rank, episodes/chapters, start_date, picture
+    Keep for backwards compatibility; it produces a single list-style embed.
+    Not used for the paged view (we show one embed per item there).
     """
     embed = discord.Embed(title=truncate(title, 120), color=EMBED_COLOR)
     embed.description = f"Top {len(items)} results from MyAnimeList"
 
-    # set thumbnail to first item's picture if available
     first_picture = None
     if items:
-        first_picture = getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None)
+        first = items[0]
+        first_picture = getattr(first, "picture", None) or (first.get("picture") if isinstance(first, dict) else None)
     if first_picture:
         embed.set_thumbnail(url=first_picture)
 
     for idx, item in enumerate(items, 1):
         name = truncate(getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—"), 80)
         url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else "")
-        # meta built from attributes/dict
         objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
         meta = _format_meta(objdict)
 
@@ -70,20 +66,18 @@ def anime_embed_from_models(title: str, items: Sequence, kind: str = "anime") ->
             value_lines.append(f"[Open on MAL]({url})")
         if meta:
             value_lines.append(meta)
-        start_date = getattr(item, "start_date", None) or objdict.get("start_date")
+        start_date = objdict.get("start_date")
         if start_date:
             value_lines.append(f"Started: {truncate(start_date, 40)}")
-
         value = "\n".join(value_lines) or "\u200b"
         embed.add_field(name=f"{idx}. {name}", value=value, inline=False)
 
-    tz = pytz.timezone("Asia/Kolkata")
-    embed.set_footer(text=f"Data from MyAnimeList • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
     return embed
 
 def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     """
-    Build a richer single-item embed (detailed card).
+    Detailed embed for a single result.
     """
     title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
     url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
@@ -91,12 +85,10 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     if url:
         embed.url = url
 
-    # Set thumbnail (small) and main image (optional). Prefer thumbnail to keep messages compact.
     picture = getattr(item, "picture", None) or (item.get("picture") if isinstance(item, dict) else None)
     if picture:
         embed.set_thumbnail(url=picture)
 
-    # Compose description lines
     objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
     lines = []
     mean = objdict.get("mean")
@@ -122,31 +114,53 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     if lines:
         embed.description = "\n".join(lines)
 
-    tz = pytz.timezone("Asia/Kolkata")
-    embed.set_footer(text=f"Data from MyAnimeList • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
+    return embed
+
+def compact_list_item_embed(item, idx: int) -> discord.Embed:
+    """
+    Compact embed used for listing results on a page. Each item gets its own embed and thumbnail.
+    idx: 1-based index (for numbering)
+    """
+    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
+    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+    objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
+    embed = discord.Embed(title=f"{idx}. {truncate(title, 80)}", color=EMBED_COLOR)
+    if url:
+        embed.url = url
+
+    picture = objdict.get("picture")
+    if picture:
+        embed.set_thumbnail(url=picture)
+
+    meta = _format_meta(objdict)
+    lines = []
+    if meta:
+        lines.append(meta)
+    if objdict.get("start_date"):
+        lines.append(f"Started: {truncate(objdict.get('start_date'), 30)}")
+    # short synopsis (optional)
+    synopsis = objdict.get("synopsis")
+    if synopsis:
+        lines.append(truncate(synopsis, 200))
+
+    embed.description = "\n".join(lines) if lines else "\u200b"
+    embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
     return embed
 
 def error_embed(message: str) -> discord.Embed:
     e = discord.Embed(title="❌ Error", description=message, color=ERROR_COLOR)
-    tz = pytz.timezone("Asia/Kolkata")
-    e.set_footer(text=f"{datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    e.set_footer(text=f"{get_footer_time()}")
     return e
 
 def get_current_season(dt: Optional[datetime] = None) -> Tuple[int, str]:
-    """
-    Return (year, season) where season is one of: 'winter', 'spring', 'summer', 'fall'.
-    If dt is None uses current date in Asia/Kolkata timezone.
-    """
     tz = pytz.timezone("Asia/Kolkata")
     now = dt.astimezone(tz) if dt else datetime.now(tz)
     month = now.month
     year = now.year
 
-    # Define typical anime seasons:
-    # Winter: Jan-Mar (1-3), Spring: Apr-Jun (4-6), Summer: Jul-Sep (7-9), Fall: Oct-Dec (10-12)
     if month in (1, 2, 3):
         season = "winter"
-        # winter season is same calendar year (e.g., Jan 2025 => winter 2025)
     elif month in (4, 5, 6):
         season = "spring"
     elif month in (7, 8, 9):
@@ -154,3 +168,10 @@ def get_current_season(dt: Optional[datetime] = None) -> Tuple[int, str]:
     else:
         season = "fall"
     return year, season
+
+def chunk_items(items: Sequence, per_page: int = 5) -> List[List]:
+    """Split sequence into pages (list of lists)."""
+    pages = []
+    for i in range(0, len(items), per_page):
+        pages.append(list(items[i:i+per_page]))
+    return pages
