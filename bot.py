@@ -1,4 +1,3 @@
-# bot.py
 import os
 import asyncio
 import logging
@@ -27,7 +26,7 @@ if not TOKEN:
     logging.critical("DISCORD_TOKEN environment variable is missing.")
     raise SystemExit(1)
 
-GUILD_ID = os.getenv("GUILD_ID")  # optional for dev
+GUILD_ID = os.getenv("GUILD_ID")  # optional
 
 def mal_configured() -> bool:
     return bool(os.getenv("MAL_CLIENT_ID"))
@@ -51,75 +50,10 @@ async def on_ready():
     except Exception as e:
         print(f"Command sync failed: {e}")
 
-class PaginatorView(discord.ui.View):
-    def __init__(self, pages: list, header: discord.Embed, timeout: int = 120):
-        """
-        pages: list of lists of embeds
-        header: first embed each page uses
-        """
-        super().__init__(timeout=timeout)
-        self.pages = pages
-        self.current = 0
-        self.header = header
-        self.message: Optional[discord.Message] = None
-
-    def _page_embeds(self, page_index: int):
-        page_count = len(self.pages)
-        header_copy = discord.Embed.from_dict(self.header.to_dict())
-        footer_text = header_copy.footer.text or ""
-        header_copy.set_footer(text=f"{footer_text} • Page {page_index+1}/{page_count}".strip(" • "))
-        embeds = [header_copy]
-        embeds.extend(self.pages[page_index])
-        return embeds
-
-    async def _edit_message(self, interaction: discord.Interaction, page_index: int):
-        new_embeds = self._page_embeds(page_index)
-        try:
-            await interaction.response.defer(update=True)
-        except Exception:
-            pass
-
-        try:
-            if self.message:
-                await self.message.edit(embeds=new_embeds, view=self)
-            else:
-                await interaction.message.edit(embeds=new_embeds, view=self)
-        except Exception as exc:
-            try:
-                await interaction.response.edit_message(embeds=new_embeds, view=self)
-            except Exception as exc2:
-                print("Failed to edit message:", exc, exc2)
-                try:
-                    await interaction.followup.send("❌ Failed to update page.", ephemeral=True)
-                except Exception:
-                    pass
-
-    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
-    async def prev(self, button: discord.ui.Button, interaction: discord.Interaction):
-        # anyone can click
-        if self.current > 0:
-            self.current -= 1
-        await self._edit_message(interaction, self.current)
-
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
-    async def next(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if self.current < len(self.pages) - 1:
-            self.current += 1
-        await self._edit_message(interaction, self.current)
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        try:
-            if self.message:
-                await self.message.edit(view=self)
-        except Exception:
-            pass
-
 @bot.tree.command(name="anime", description="Search anime on MAL")
 async def anime(interaction: discord.Interaction, query: str):
     if not mal_configured():
-        await interaction.response.send_message(embed=util_error_embed("MAL client not configured. Please set MAL_CLIENT_ID."), ephemeral=True)
+        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -130,30 +64,8 @@ async def anime(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=util_error_embed("No results found."), ephemeral=True)
             return
 
-        # Build embeds
         item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
-
-        # If ≤ 5 results, just send them without buttons
-        if len(item_embeds) <= 5:
-            await interaction.followup.send(embeds=item_embeds)
-            return
-
-        pages_of_embeds = chunk_items(item_embeds, 5)
-        header = discord.Embed(
-            title=f"Results for “{query}”",
-            description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})",
-            color=EMBED_COLOR,
-        )
-        first_pic = getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None)
-        if first_pic:
-            header.set_thumbnail(url=first_pic)
-        header.set_footer(text=f"Data from MyAnimeList • Page 1/{len(pages_of_embeds)}")
-
-        view = PaginatorView(pages=pages_of_embeds, header=header, timeout=120)
-        to_send = view._page_embeds(0)
-        msg = await interaction.followup.send(embeds=to_send, view=view)
-        view.message = msg
-
+        await interaction.followup.send(embeds=item_embeds)
     except Exception as e:
         print("Error in /anime command:", e)
         await interaction.followup.send(embed=util_error_embed(str(e)))
@@ -161,7 +73,7 @@ async def anime(interaction: discord.Interaction, query: str):
 @bot.tree.command(name="manga", description="Search manga on MAL")
 async def manga(interaction: discord.Interaction, query: str):
     if not mal_configured():
-        await interaction.response.send_message(embed=util_error_embed("MAL client not configured. Please set MAL_CLIENT_ID."), ephemeral=True)
+        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
         return
 
     await interaction.response.defer()
@@ -173,30 +85,34 @@ async def manga(interaction: discord.Interaction, query: str):
             return
 
         item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
-
-        if len(item_embeds) <= 5:
-            await interaction.followup.send(embeds=item_embeds)
-            return
-
-        pages_of_embeds = chunk_items(item_embeds, 5)
-        header = discord.Embed(
-            title=f"Manga results for “{query}”",
-            description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})",
-            color=EMBED_COLOR,
-        )
-        first_pic = getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None)
-        if first_pic:
-            header.set_thumbnail(url=first_pic)
-        header.set_footer(text=f"Data from MyAnimeList • Page 1/{len(pages_of_embeds)}")
-
-        view = PaginatorView(pages=pages_of_embeds, header=header, timeout=120)
-        to_send = view._page_embeds(0)
-        msg = await interaction.followup.send(embeds=to_send, view=view)
-        view.message = msg
-
+        await interaction.followup.send(embeds=item_embeds)
     except Exception as e:
         print("Error in /manga command:", e)
         await interaction.followup.send(embed=util_error_embed(str(e)))
+
+@bot.tree.command(name="season", description="Get current anime season list")
+async def season(interaction: discord.Interaction):
+    if not mal_configured():
+        await interaction.response.send_message(embed=util_error_embed("MAL client not configured."), ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    try:
+        year, season_name = get_current_season()
+        async with MALClient() as mal:
+            items = await mal.seasonal_anime(year, season_name)
+        if not items:
+            await interaction.followup.send(embed=util_error_embed("No seasonal anime found."), ephemeral=True)
+            return
+
+        item_embeds = [compact_list_item_embed(item, idx+1) for idx, item in enumerate(items)]
+        await interaction.followup.send(embeds=item_embeds)
+    except Exception as e:
+        print("Error in /season command:", e)
+        await interaction.followup.send(embed=util_error_embed(str(e)))
+
+# Add more commands here as needed
+# e.g. /trending, /top, /recommend etc.
 
 async def health(_request):
     return web.Response(text="ok")

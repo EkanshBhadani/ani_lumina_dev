@@ -1,5 +1,4 @@
-# utils.py
-from typing import Iterable, Optional, Sequence, Tuple, List
+from typing import Sequence, Optional, List, Tuple
 import discord
 from datetime import datetime
 import pytz
@@ -43,7 +42,7 @@ def get_footer_time() -> str:
 
 def compact_list_item_embed(item, idx: int) -> discord.Embed:
     """
-    Compact embed used for listing results on a page. Each item gives its own embed with thumbnail.
+    Compact embed used for listing results. Each item has its own embed with thumbnail.
     idx: 1-based index (for numbering)
     """
     title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
@@ -109,7 +108,6 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
 
     if lines:
         embed.description = "\n".join(lines)
-
     embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
     return embed
 
