@@ -1,10 +1,11 @@
+# utils.py
 from typing import Iterable, Optional, Sequence, Tuple, List
 import discord
 from datetime import datetime
 import pytz
 
 # Visual theming
-EMBED_COLOR = 0x1F8B4C  # change if you want
+EMBED_COLOR = 0x1F8B4C  # change if you prefer
 ERROR_COLOR = 0xE74C3C
 
 def truncate(s: Optional[str], n: int = 256) -> str:
@@ -40,38 +41,33 @@ def get_footer_time() -> str:
     tz = pytz.timezone("Asia/Kolkata")
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
 
-def anime_embed_from_models(title: str, items: Sequence, kind: str = "anime") -> discord.Embed:
+def compact_list_item_embed(item, idx: int) -> discord.Embed:
     """
-    Keep for backwards compatibility; it produces a single list-style embed.
-    Not used for the paged view (we show one embed per item there).
+    Compact embed used for listing results on a page. Each item gives its own embed with thumbnail.
+    idx: 1-based index (for numbering)
     """
-    embed = discord.Embed(title=truncate(title, 120), color=EMBED_COLOR)
-    embed.description = f"Top {len(items)} results from MyAnimeList"
+    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
+    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+    objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
+    embed = discord.Embed(title=f"{idx}. {truncate(title, 80)}", color=EMBED_COLOR)
+    if url:
+        embed.url = url
 
-    first_picture = None
-    if items:
-        first = items[0]
-        first_picture = getattr(first, "picture", None) or (first.get("picture") if isinstance(first, dict) else None)
-    if first_picture:
-        embed.set_thumbnail(url=first_picture)
+    picture = objdict.get("picture")
+    if picture:
+        embed.set_thumbnail(url=picture)
 
-    for idx, item in enumerate(items, 1):
-        name = truncate(getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—"), 80)
-        url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else "")
-        objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
-        meta = _format_meta(objdict)
+    meta = _format_meta(objdict)
+    lines = []
+    if meta:
+        lines.append(meta)
+    if objdict.get("start_date"):
+        lines.append(f"Started: {truncate(objdict.get('start_date'), 30)}")
+    synopsis = objdict.get("synopsis")
+    if synopsis:
+        lines.append(truncate(synopsis, 200))
 
-        value_lines = []
-        if url:
-            value_lines.append(f"[Open on MAL]({url})")
-        if meta:
-            value_lines.append(meta)
-        start_date = objdict.get("start_date")
-        if start_date:
-            value_lines.append(f"Started: {truncate(start_date, 40)}")
-        value = "\n".join(value_lines) or "\u200b"
-        embed.add_field(name=f"{idx}. {name}", value=value, inline=False)
-
+    embed.description = "\n".join(lines) if lines else "\u200b"
     embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
     return embed
 
@@ -114,37 +110,6 @@ def single_item_embed(item, kind: str = "anime") -> discord.Embed:
     if lines:
         embed.description = "\n".join(lines)
 
-    embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
-    return embed
-
-def compact_list_item_embed(item, idx: int) -> discord.Embed:
-    """
-    Compact embed used for listing results on a page. Each item gets its own embed and thumbnail.
-    idx: 1-based index (for numbering)
-    """
-    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
-    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
-    objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
-    embed = discord.Embed(title=f"{idx}. {truncate(title, 80)}", color=EMBED_COLOR)
-    if url:
-        embed.url = url
-
-    picture = objdict.get("picture")
-    if picture:
-        embed.set_thumbnail(url=picture)
-
-    meta = _format_meta(objdict)
-    lines = []
-    if meta:
-        lines.append(meta)
-    if objdict.get("start_date"):
-        lines.append(f"Started: {truncate(objdict.get('start_date'), 30)}")
-    # short synopsis (optional)
-    synopsis = objdict.get("synopsis")
-    if synopsis:
-        lines.append(truncate(synopsis, 200))
-
-    embed.description = "\n".join(lines) if lines else "\u200b"
     embed.set_footer(text=f"Data from MyAnimeList • {get_footer_time()}")
     return embed
 
