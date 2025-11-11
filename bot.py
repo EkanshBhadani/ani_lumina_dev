@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands
+
 from aiohttp import web
 
 from mal_client import MALClient
@@ -26,6 +27,8 @@ if not TOKEN:
     logging.critical("DISCORD_TOKEN environment variable is missing.")
     raise SystemExit(1)
 
+GUILD_ID = os.getenv("GUILD_ID")  # optional: set while developing to register commands to a guild instantly
+
 def mal_configured() -> bool:
     return bool(os.getenv("MAL_CLIENT_ID"))
 
@@ -37,9 +40,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id})")
+    # If a GUILD_ID is provided, sync commands to that guild for instant availability in that server.
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} application commands.")
+        if GUILD_ID:
+            guild_obj = discord.Object(id=int(GUILD_ID))
+            synced = await bot.tree.sync(guild=guild_obj)
+            print(f"Synced {len(synced)} commands to guild {GUILD_ID}.")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} global commands.")
     except Exception as e:
         print(f"Command sync failed: {e}")
 
@@ -56,49 +65,72 @@ class PaginatorView(discord.ui.View):
         self.current = 0
 
     async def _update_message(self, interaction: discord.Interaction):
-        # edit original message to show current page's embeds
         embeds = self.pages[self.current]
         footer_text = f"Page {self.current+1}/{len(self.pages)}"
-        # also set top embed footer (we will update all embeds footers)
         for e in embeds:
-            # ensure footer shows page
-            e.set_footer(text=f"{e.footer.text if e.footer and e.footer.text else ''} • {footer_text}".strip(" • "))
+            # append page info in footer (if exists keep existing text)
+            existing = e.footer.text if e.footer and e.footer.text else ""
+            e.set_footer(text=f"{existing} • {footer_text}".strip(" • "))
+        # use response.edit_message to properly acknowledge the interaction
         await interaction.response.edit_message(embeds=embeds, view=self)
 
-    def _check_user(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            # tell them they can't control it
-            asyncio.create_task(interaction.response.send_message("You can't control this pagination session.", ephemeral=True))
-            return False
-        return True
+    async def _deny_control(self, interaction: discord.Interaction):
+        # used when a non-author tries to use controls
+        # respond promptly so Discord does not show "This interaction failed"
+        try:
+            await interaction.response.send_message("You can't control this pagination session.", ephemeral=True)
+        except Exception:
+            # ignore if it's already responded somehow
+            pass
+
+    async def _is_author(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
     async def prev(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if not self._check_user(interaction):
+        # check auth
+        if not await self._is_author(interaction):
+            await self._deny_control(interaction)
             return
-        if self.current <= 0:
-            self.current = 0
-        else:
-            self.current -= 1
-        await self._update_message(interaction)
+        try:
+            if self.current > 0:
+                self.current -= 1
+            await self._update_message(interaction)
+        except Exception as exc:
+            # guarantee we respond so the interaction doesn't fail
+            try:
+                await interaction.response.send_message(f"Error updating page: {exc}", ephemeral=True)
+            except Exception:
+                # fallback: try editing the message directly
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next(self, button: discord.ui.Button, interaction: discord.Interaction):
-        if not self._check_user(interaction):
+        if not await self._is_author(interaction):
+            await self._deny_control(interaction)
             return
-        if self.current >= len(self.pages) - 1:
-            self.current = len(self.pages) - 1
-        else:
-            self.current += 1
-        await self._update_message(interaction)
+        try:
+            if self.current < len(self.pages) - 1:
+                self.current += 1
+            await self._update_message(interaction)
+        except Exception as exc:
+            try:
+                await interaction.response.send_message(f"Error updating page: {exc}", ephemeral=True)
+            except Exception:
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
 
     async def on_timeout(self):
-        # disable buttons after timeout
         for item in self.children:
             item.disabled = True
-        # try to edit original message to disable UI
-        # We cannot access interaction here, but we can attempt to fetch the message if needed.
-        # Simpler: do nothing; Render logs will show view expired. If you want, store message reference in view.
+        # try to edit the original message to disable buttons (best effort)
+        # We don't have the original interaction here; if you need deterministic disabling,
+        # store message reference when sending and use it to edit after timeout.
         return
 
 # ----- Commands -----
@@ -117,27 +149,19 @@ async def anime(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=util_error_embed("No results found."), ephemeral=True)
             return
 
-        # Build per-item compact embeds (each has its own thumbnail)
         item_embeds = []
         for idx, item in enumerate(items, 1):
             embed = compact_list_item_embed(item, idx)
             item_embeds.append(embed)
 
-        # chunk into pages of 5
-        pages_of_embeds = chunk_items(item_embeds, 5)  # list of lists of embeds
-
-        # create view
+        pages_of_embeds = chunk_items(item_embeds, 5)
         view = PaginatorView(pages=pages_of_embeds, author_id=interaction.user.id, timeout=120)
 
-        # send initial page (page 0)
-        initial_embeds = pages_of_embeds[0]
-        # add a header embed (optional) as first embed with title
         header = discord.Embed(title=f"Results for “{query}”", description=f"Showing {min(5, len(items))} of {len(items)} results (page 1/{len(pages_of_embeds)})", color=EMBED_COLOR)
         header.set_thumbnail(url=getattr(items[0], "picture", None) or (items[0].get("picture") if isinstance(items[0], dict) else None))
         header.set_footer(text=f"Data from MyAnimeList • Page 1/{len(pages_of_embeds)}")
-        # combine header + page embeds
-        to_send = [header] + initial_embeds
 
+        to_send = [header] + pages_of_embeds[0]
         await interaction.followup.send(embeds=to_send, view=view)
     except Exception as e:
         await interaction.followup.send(embed=util_error_embed(str(e)))
