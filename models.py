@@ -1,43 +1,57 @@
-from datetime import datetime
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
 
-def _month_to_season(month: int) -> str:
-    # seasons: winter(Jan-Mar), spring(Apr-Jun), summer(Jul-Sep), fall(Oct-Dec)
-    if month in (12, 1, 2):
-        return "winter"
-    if month in (3, 4, 5):
-        return "spring"
-    if month in (6, 7, 8):
-        return "summer"
-    return "fall"
+@dataclass
+class Anime:
+    id: int
+    title: str
+    url: str
+    mean: Optional[float]
+    rank: Optional[int]
+    status: Optional[str]
+    episodes: Optional[int]
+    start_date: Optional[str]
+    picture: Optional[str]
 
-def get_current_season(now: datetime = None) -> Tuple[int, str]:
-    now = now or datetime.utcnow()
-    month = now.month
-    season = _month_to_season(month)
-    year = now.year
-    # If it's December and it's winter mapping to next year, keep year+1 for winter if desired.
-    # Most MAL seasonal endpoints use year+season where winter is the year (e.g., winter 2025 is Jan-Mar 2025)
-    # So we will not bump year for December in this implementation.
-    return year, season
+@dataclass
+class Manga:
+    id: int
+    title: str
+    url: str
+    mean: Optional[float]
+    rank: Optional[int]
+    status: Optional[str]
+    chapters: Optional[int]
+    volumes: Optional[int]
+    start_date: Optional[str]
+    picture: Optional[str]
 
-def get_next_season(now: datetime = None) -> Tuple[int, str]:
-    now = now or datetime.utcnow()
-    month = now.month
-    year = now.year
-    # determine next season by month
-    if month in (12, 1, 2):
-        # currently winter -> next is spring
-        next_season = "spring"
-        if month == 12:
-            # December -> next season's year may be next year for some interpretations; keep same year for simplicity
-            year = year + 1 if month == 12 else year
-    elif month in (3, 4, 5):
-        next_season = "summer"
-    elif month in (6, 7, 8):
-        next_season = "fall"
-    else:
-        next_season = "winter"
-        if month >= 10:
-            year = year + 1
-    return year, next_season
+def parse_anime(node: Dict[str, Any]) -> Anime:
+    main = node.get("node", node)  # ranking endpoints wrap with {"node": {...}}
+    stats = main.get("statistics") or {}
+    return Anime(
+        id=main["id"],
+        title=main.get("title"),
+        url=main.get("main_picture", {}).get("medium") and f"https://myanimelist.net/anime/{main['id']}",
+        mean=main.get("mean"),
+        rank=main.get("rank"),
+        status=main.get("status"),
+        episodes=main.get("num_episodes"),
+        start_date=main.get("start_date"),
+        picture=(main.get("main_picture") or {}).get("medium") or (main.get("main_picture") or {}).get("large"),
+    )
+
+def parse_manga(node: Dict[str, Any]) -> Manga:
+    main = node.get("node", node)
+    return Manga(
+        id=main["id"],
+        title=main.get("title"),
+        url=main.get("main_picture", {}).get("medium") and f"https://myanimelist.net/manga/{main['id']}",
+        mean=main.get("mean"),
+        rank=main.get("rank"),
+        status=main.get("status"),
+        chapters=main.get("num_chapters"),
+        volumes=main.get("num_volumes"),
+        start_date=main.get("start_date"),
+        picture=(main.get("main_picture") or {}).get("medium") or (main.get("main_picture") or {}).get("large"),
+    )
