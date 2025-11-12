@@ -10,13 +10,13 @@ from aiohttp import web
 
 from mal_client import MALClient
 from utils import (
-    anime_embed_from_models,
-    single_item_embed,
     get_current_season,
     EMBED_COLOR,
+    build_item_card_embed,     # NEW: per-item card builder
+    error_embed as utils_error # keep local alias if you want to use the utils one
 )
 
-# load for local; on Render, env vars are injected
+# load for local; on Render/host, env vars are injected
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -29,10 +29,13 @@ def mal_configured() -> bool:
     return bool(os.getenv("MAL_CLIENT_ID"))
 
 
-# small helper to build consistent error embeds
+# (Optional) small helper to build consistent error embeds locally
 def error_embed(message: str) -> discord.Embed:
-    e = discord.Embed(title="❌ Error", description=message, color=0xE74C3C)
-    return e
+    try:
+        return utils_error(message)
+    except Exception:
+        e = discord.Embed(title="❌ Error", description=message, color=0xE74C3C)
+        return e
 
 
 intents = discord.Intents.default()
@@ -54,10 +57,31 @@ async def on_ready():
         print(f"Command sync failed: {e}")
 
 
+# --------- helpers for the new layout ----------
+def _header_embed(title: str, description: str, thumb_url: str | None = None) -> discord.Embed:
+    """Create a clean header embed that sits above the per-item cards."""
+    embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
+    if thumb_url:
+        embed.set_thumbnail(url=thumb_url)
+    return embed
+
+
+async def _send_cards(interaction: discord.Interaction, header: discord.Embed, items, page_label: str | None = None):
+    """
+    Sends a header embed + up to 10 item-card embeds in a single message
+    (Discord limit: 10 embeds per message; if you ever raise limit, split messages).
+    """
+    embeds = [header]
+    # Start indices at 1; if you implement pagination later, bump the start.
+    for i, item in enumerate(items[:10], start=1):
+        card = build_item_card_embed(item, index=i, source_label=("Data from MyAnimeList" + (f" • {page_label}" if page_label else "")))
+        embeds.append(card)
+    await interaction.followup.send(embeds=embeds)
+
+
 # --------- SLASH COMMANDS ----------
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping(interaction: discord.Interaction):
-    # simple consistent embed response
     embed = discord.Embed(
         title="Pong!",
         description=f"Latency: **{round(bot.latency * 1000)} ms**",
@@ -86,13 +110,18 @@ async def anime(interaction: discord.Interaction, query: str):
             await interaction.followup.send(embed=error_embed("No results found."), ephemeral=True)
             return
 
-        # If only one result, show a detailed card; otherwise show list embed
+        # if only one result, show detailed card
         if len(items) == 1:
-            embed = single_item_embed(items[0], kind="anime")
-        else:
-            embed = anime_embed_from_models(f"Results for “{query}”", items, kind="anime")
+            await interaction.followup.send(embed=build_item_card_embed(items[0], index=1))
+            return
 
-        await interaction.followup.send(embed=embed)
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"Anime results for “{query}”",
+            description=f"Showing {len(items)} result{'s' if len(items)!=1 else ''} from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
         await interaction.followup.send(embed=error_embed(str(e)))
 
@@ -118,11 +147,16 @@ async def manga(interaction: discord.Interaction, query: str):
             return
 
         if len(items) == 1:
-            embed = single_item_embed(items[0], kind="manga")
-        else:
-            embed = anime_embed_from_models(f"Manga results for “{query}”", items, kind="manga")
+            await interaction.followup.send(embed=build_item_card_embed(items[0], index=1))
+            return
 
-        await interaction.followup.send(embed=embed)
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"Manga results for “{query}”",
+            description=f"Showing {len(items)} result{'s' if len(items)!=1 else ''} from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
         await interaction.followup.send(embed=error_embed(str(e)))
 
@@ -147,8 +181,13 @@ async def airing(interaction: discord.Interaction):
             await interaction.followup.send(embed=error_embed("No airing results found."), ephemeral=True)
             return
 
-        embed = anime_embed_from_models("Top Airing Anime", items, kind="anime")
-        await interaction.followup.send(embed=embed)
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title="Top Airing Anime",
+            description=f"Top {len(items)} picks from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
         await interaction.followup.send(embed=error_embed(str(e)))
 
@@ -173,8 +212,13 @@ async def trending(interaction: discord.Interaction):
             await interaction.followup.send(embed=error_embed("No trending results found."), ephemeral=True)
             return
 
-        embed = anime_embed_from_models("Trending Anime (Popularity)", items, kind="anime")
-        await interaction.followup.send(embed=embed)
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title="Trending Anime (Popularity)",
+            description=f"Top {len(items)} by popularity on MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
         await interaction.followup.send(embed=error_embed(str(e)))
 
@@ -204,8 +248,13 @@ async def seasonal(interaction: discord.Interaction, year: int = 0, season: str 
             await interaction.followup.send(embed=error_embed("No seasonal results found."), ephemeral=True)
             return
 
-        embed = anime_embed_from_models(f"{s.title()} {y} — Seasonal", items, kind="anime")
-        await interaction.followup.send(embed=embed)
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"{s.title()} {y} — Seasonal",
+            description=f"Top {len(items)} picks from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
         await interaction.followup.send(embed=error_embed(str(e)))
 
@@ -242,4 +291,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Shutting down")
-        
