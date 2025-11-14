@@ -1,206 +1,293 @@
+# bot.py
 import os
-import logging
-import datetime
 import asyncio
-from typing import List, Dict, Any, Optional
+import logging
+from dotenv import load_dotenv
 
 import discord
-from discord import app_commands
+from discord.ext import commands
+from aiohttp import web
 
-# local modules — assumed in repo
-import mal_client
-import utils
+from mal_client import MALClient
+from utils import (
+    get_current_season,
+    EMBED_COLOR,
+    build_item_card_embed,     # NEW: per-item card builder
+    error_embed as utils_error # keep local alias if you want to use the utils one
+)
 
-# logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ani_lumina")
+# load for local; on Render/host, env vars are injected
+load_dotenv()
 
-# Load env (if using python-dotenv locally)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-MAL_CLIENT_ID = os.getenv("MAL_CLIENT_ID")  # recommended to set in env
-
-# If you want to hardcode MAL client id for quick testing (not recommended):
-# os.environ["MAL_CLIENT_ID"] = "PASTE_CLIENT_ID_HERE"  # <-- add client id here (not recommended)
-
-if not DISCORD_TOKEN:
-    logger.error("DISCORD_TOKEN is not set. Put your Discord bot token in DISCORD_TOKEN env var.")
-    raise SystemExit("Missing DISCORD_TOKEN environment variable")
-
-intents = discord.Intents.none()  # minimal intents for slash commands
-# if you need message content or member intents, enable here and in Discord Developer Portal
-# intents.message_content = True
-
-bot = discord.Client(intents=intents)
-tree = app_commands.CommandTree(bot)
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    logging.critical("DISCORD_TOKEN environment variable is missing.")
+    raise SystemExit(1)
 
 
-def compact_embed_for_results(kind: str, query: str, results: List[Dict[str, Any]]) -> discord.Embed:
-    """
-    Build a compact embed listing up to len(results) items. Small thumbnail (first result).
-    Each result becomes an embed field with short lines.
-    """
-    title = f"{utils.human_readable_kind(kind)} results for “{query}”"
-    embed = discord.Embed(title=title, color=0x1DB954, timestamp=datetime.datetime.now(datetime.timezone.utc))
-    embed.set_footer(text="Data from MyAnimeList")
-    if not results:
-        embed.description = f"❌ No results found."
-        return embed
+def mal_configured() -> bool:
+    return bool(os.getenv("MAL_CLIENT_ID"))
 
-    # first result thumbnail (small)
-    first_img = utils.extract_image_url(results[0])
-    if first_img:
-        # use thumbnail (small)
-        embed.set_thumbnail(url=first_img)
 
-    # Add up to 15 results — each as a field (compact)
-    for idx, item in enumerate(results[:15], start=1):
-        # name and URL
-        title_line, mal_url = utils._format_title_and_url(item, kind)
-        # meta lines: rating, rank, episodes, status, start date
-        meta = utils._format_meta_line(item)
-        # short description lines
-        value_lines = []
-        if meta:
-            value_lines.append(meta)
-        if mal_url:
-            value_lines.append(f"[Open on MAL]({mal_url})")
-        # ensure short field values
-        field_value = "\n".join(value_lines) or "\u200b"
-        # field name: "1. Title"
-        field_name = f"{idx}. {title_line}"
-        embed.add_field(name=field_name, value=field_value, inline=False)
+# (Optional) small helper to build consistent error embeds locally
+def error_embed(message: str) -> discord.Embed:
+    try:
+        return utils_error(message)
+    except Exception:
+        e = discord.Embed(title="❌ Error", description=message, color=0xE74C3C)
+        return e
 
+
+intents = discord.Intents.default()
+# enable only what you need; Message Content is ON in Dev Portal per your setup
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+# --------- BOT EVENTS ----------
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (id={bot.user.id})")
+    # try syncing slash commands (safe to call; if already synced this is quick)
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} application commands.")
+    except Exception as e:
+        print(f"Command sync failed: {e}")
+
+
+# --------- helpers for the new layout ----------
+def _header_embed(title: str, description: str, thumb_url: str | None = None) -> discord.Embed:
+    """Create a clean header embed that sits above the per-item cards."""
+    embed = discord.Embed(title=title, description=description, color=EMBED_COLOR)
+    if thumb_url:
+        embed.set_thumbnail(url=thumb_url)
     return embed
 
 
-@tree.command(name="anime", description="Search anime on MAL (compact results)")
-@app_commands.describe(query="Anime name to search", limit="Max results to fetch (max 15)")
-async def anime(interaction: discord.Interaction, query: str, limit: Optional[int] = 15):
-    await interaction.response.defer(thinking=True)
-    try:
-        limit = max(1, min(15, limit or 15))
-        results = await mal_client.search("anime", query, limit=limit)
-        embed = compact_embed_for_results("anime", query, results)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        logger.exception("Error in /anime")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
-
-
-@tree.command(name="manga", description="Search manga on MAL (compact results)")
-@app_commands.describe(query="Manga name to search", limit="Max results to fetch (max 15)")
-async def manga(interaction: discord.Interaction, query: str, limit: Optional[int] = 15):
-    await interaction.response.defer(thinking=True)
-    try:
-        limit = max(1, min(15, limit or 15))
-        results = await mal_client.search("manga", query, limit=limit)
-        embed = compact_embed_for_results("manga", query, results)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        logger.exception("Error in /manga")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
-
-
-@tree.command(name="info", description="Get info about an anime or manga by id or url")
-@app_commands.describe(kind="Kind (anime/manga)", identifier="id or url or title")
-async def info(interaction: discord.Interaction, identifier: str, kind: str = "anime"):
+async def _send_cards(interaction: discord.Interaction, header: discord.Embed, items, page_label: str | None = None):
     """
-    NOTE: signature uses identifier first to avoid positional/default mismatch.
+    Sends a header embed + up to 10 item-card embeds in a single message
+    (Discord limit: 10 embeds per message; if you ever raise limit, split messages).
     """
-    await interaction.response.defer(thinking=True)
+    embeds = [header]
+    # Start indices at 1; if you implement pagination later, bump the start.
+    for i, item in enumerate(items[:10], start=1):
+        card = build_item_card_embed(item, index=i, source_label=("Data from MyAnimeList" + (f" • {page_label}" if page_label else "")))
+        embeds.append(card)
+    await interaction.followup.send(embeds=embeds)
+
+
+# --------- SLASH COMMANDS ----------
+@bot.tree.command(name="ping", description="Check bot latency")
+async def ping(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Pong!",
+        description=f"Latency: **{round(bot.latency * 1000)} ms**",
+        color=EMBED_COLOR,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="anime", description="Search anime on MAL")
+async def anime(interaction: discord.Interaction, query: str):
+    if not mal_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "MAL client not configured. Ask the bot admin to set MAL_CLIENT_ID in the host environment."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
     try:
-        data = await mal_client.info(identifier, kind=kind)
-        embed = utils.embed_from_info(data, kind=kind)
-        await interaction.followup.send(embed=embed)
+        async with MALClient() as mal:
+            items = await mal.search_anime(query, limit=5)
+
+        if not items:
+            await interaction.followup.send(embed=error_embed("No results found."), ephemeral=True)
+            return
+
+        # if only one result, show detailed card
+        if len(items) == 1:
+            await interaction.followup.send(embed=build_item_card_embed(items[0], index=1))
+            return
+
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"Anime results for “{query}”",
+            description=f"Showing {len(items)} result{'s' if len(items)!=1 else ''} from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
-        logger.exception("Error in /info")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+        await interaction.followup.send(embed=error_embed(str(e)))
 
 
-# Additional commands you requested (character, staff/voice actor, studio, schedule, nextseason)
-@tree.command(name="character", description="Search character on MAL")
-@app_commands.describe(query="Character name to search", limit="Max results to fetch (max 10)")
-async def character(interaction: discord.Interaction, query: str, limit: Optional[int] = 5):
-    await interaction.response.defer(thinking=True)
+@bot.tree.command(name="manga", description="Search manga on MAL")
+async def manga(interaction: discord.Interaction, query: str):
+    if not mal_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "MAL client not configured. Ask the bot admin to set MAL_CLIENT_ID in the host environment."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
     try:
-        limit = max(1, min(10, limit or 5))
-        results = await mal_client.search("character", query, limit=limit)
-        embed = compact_embed_for_results("character", query, results)
-        await interaction.followup.send(embed=embed)
+        async with MALClient() as mal:
+            items = await mal.search_manga(query, limit=5)
+
+        if not items:
+            await interaction.followup.send(embed=error_embed("No results found."), ephemeral=True)
+            return
+
+        if len(items) == 1:
+            await interaction.followup.send(embed=build_item_card_embed(items[0], index=1))
+            return
+
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"Manga results for “{query}”",
+            description=f"Showing {len(items)} result{'s' if len(items)!=1 else ''} from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
-        logger.exception("Error in /character")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+        await interaction.followup.send(embed=error_embed(str(e)))
 
 
-@tree.command(name="voiceactor", description="Search voice actor / seiyuu on MAL")
-@app_commands.describe(query="Voice actor name to search", limit="Max results to fetch (max 10)")
-async def voiceactor(interaction: discord.Interaction, query: str, limit: Optional[int] = 5):
-    await interaction.response.defer(thinking=True)
+@bot.tree.command(name="airing", description="Top airing anime (MAL ranking)")
+async def airing(interaction: discord.Interaction):
+    if not mal_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "MAL client not configured. Ask the bot admin to set MAL_CLIENT_ID in the host environment."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
     try:
-        limit = max(1, min(10, limit or 5))
-        results = await mal_client.search("people", query, limit=limit)
-        embed = compact_embed_for_results("people", query, results)
-        await interaction.followup.send(embed=embed)
+        async with MALClient() as mal:
+            items = await mal.top_airing_anime(limit=5)
+
+        if not items:
+            await interaction.followup.send(embed=error_embed("No airing results found."), ephemeral=True)
+            return
+
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title="Top Airing Anime",
+            description=f"Top {len(items)} picks from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
-        logger.exception("Error in /voiceactor")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+        await interaction.followup.send(embed=error_embed(str(e)))
 
 
-@tree.command(name="studio", description="Search studios / production houses on MAL")
-@app_commands.describe(query="Studio name to search", limit="Max results to fetch (max 10)")
-async def studio(interaction: discord.Interaction, query: str, limit: Optional[int] = 5):
-    await interaction.response.defer(thinking=True)
+@bot.tree.command(name="trending", description="Trending anime (by popularity)")
+async def trending(interaction: discord.Interaction):
+    if not mal_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "MAL client not configured. Ask the bot admin to set MAL_CLIENT_ID in the host environment."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
     try:
-        limit = max(1, min(10, limit or 5))
-        results = await mal_client.search("studio", query, limit=limit)
-        embed = compact_embed_for_results("studio", query, results)
-        await interaction.followup.send(embed=embed)
+        async with MALClient() as mal:
+            items = await mal.trending_anime(limit=5)
+
+        if not items:
+            await interaction.followup.send(embed=error_embed("No trending results found."), ephemeral=True)
+            return
+
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title="Trending Anime (Popularity)",
+            description=f"Top {len(items)} by popularity on MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
-        logger.exception("Error in /studio")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+        await interaction.followup.send(embed=error_embed(str(e)))
 
 
-@tree.command(name="schedule", description="Show anime schedule for a day (e.g. monday)")
-@app_commands.describe(day="Day name (monday, tuesday, ...)")
-async def schedule(interaction: discord.Interaction, day: str = "today"):
-    await interaction.response.defer(thinking=True)
+@bot.tree.command(name="seasonal", description="Current season picks (MAL seasonal)")
+async def seasonal(interaction: discord.Interaction, year: int = 0, season: str = ""):
+    if not mal_configured():
+        await interaction.response.send_message(
+            embed=error_embed(
+                "MAL client not configured. Ask the bot admin to set MAL_CLIENT_ID in the host environment."
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
     try:
-        results = await mal_client.schedule(day)
-        embed = compact_embed_for_results("schedule", day, results)
-        await interaction.followup.send(embed=embed)
+        if not year or not season:
+            y, s = get_current_season()
+        else:
+            y, s = year, season.lower()
+
+        async with MALClient() as mal:
+            items = await mal.seasonal(y, s, limit=5)
+
+        if not items:
+            await interaction.followup.send(embed=error_embed("No seasonal results found."), ephemeral=True)
+            return
+
+        first_pic = getattr(items[0], "picture", None)
+        header = _header_embed(
+            title=f"{s.title()} {y} — Seasonal",
+            description=f"Top {len(items)} picks from MyAnimeList",
+            thumb_url=first_pic,
+        )
+        await _send_cards(interaction, header, items)
     except Exception as e:
-        logger.exception("Error in /schedule")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+        await interaction.followup.send(embed=error_embed(str(e)))
 
 
-@tree.command(name="nextseason", description="List animes planned for the next season")
-async def nextseason(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    try:
-        results = await mal_client.next_season()
-        embed = compact_embed_for_results("next_season", "next season", results)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        logger.exception("Error in /nextseason")
-        await interaction.followup.send(embed=utils.error_embed(str(e)))
+# --------- HEALTH SERVER (for Render Web Service) ----------
+async def health(_request):
+    return web.Response(text="ok")
 
 
-@bot.event
-async def on_ready():
-    logger.info(f"Logged in as {bot.user} (id: {bot.user.id})")
-    # Sync commands to your application (global). For development, consider syncing to a guild.
-    try:
-        await tree.sync()
-        logger.info("Slash commands synced.")
-    except Exception:
-        logger.exception("Failed to sync commands.")
+async def start_web_app(host: str = "0.0.0.0", port: int = 8080):
+    app = web.Application()
+    app.add_routes([web.get("/", health), web.get("/health", health)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    print(f"Health server started on http://{host}:{port}")
+
+
+async def main():
+    port = int(os.getenv("PORT", "8080"))
+    web_task = asyncio.create_task(start_web_app(port=port))
+    bot_task = asyncio.create_task(bot.start(TOKEN))
+    done, pending = await asyncio.wait([web_task, bot_task], return_when=asyncio.FIRST_EXCEPTION)
+    for t in pending:
+        t.cancel()
+    for t in done:
+        if t.exception():
+            raise t.exception()
 
 
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Shutting down")

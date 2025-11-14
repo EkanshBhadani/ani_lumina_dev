@@ -1,155 +1,187 @@
-from typing import Dict, Any, Optional, Tuple, List
-import datetime
+from typing import Optional, Sequence, Tuple
+
 import discord
+from datetime import datetime
+import pytz
 
-def human_readable_kind(kind: str) -> str:
-    m = {
-        "anime": "Anime",
-        "manga": "Manga",
-        "people": "Person",
-        "character": "Character",
-        "studio": "Studio",
-        "schedule": "Schedule",
-        "next_season": "Next season",
-        "top": "Top",
-        "trending": "Trending",
-    }
-    return m.get(kind, kind.title())
+# Visual theming
+EMBED_COLOR = 0x1F8B4C  # change to any hex to tweak the accent color
+ERROR_COLOR = 0xE74C3C
 
+def truncate(s: Optional[str], n: int = 256) -> str:
+    if not s:
+        return ""
+    s = str(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
 
-def error_embed(message: str) -> discord.Embed:
-    embed = discord.Embed(title="❌ Error", description=message, color=0xE74C3C,
-                          timestamp=datetime.datetime.now(datetime.timezone.utc))
-    return embed
-
-
-def extract_image_url(data: Dict[str, Any]) -> Optional[str]:
-    """
-    Try to extract a small thumbnail URL from the MAL response item.
-    The actual MAL response shape depends on mal_client. This function should be adapted if necessary.
-    """
-    if not data:
-        return None
-    # common keys: 'image_url', 'images' etc
-    if "image_url" in data and data["image_url"]:
-        return data["image_url"]
-    if "images" in data:
-        # may have images['jpg']['image_url']
-        imgs = data["images"]
-        if isinstance(imgs, dict):
-            # try common MAL v2 json structure
-            for k in ("jpg", "webp"):
-                if k in imgs and isinstance(imgs[k], dict) and imgs[k].get("image_url"):
-                    return imgs[k]["image_url"]
-    # fallback
-    return None
-
-
-def _format_title_and_url(data: Dict[str, Any], kind: str) -> Tuple[str, Optional[str]]:
-    """
-    Return (title_text, mal_url) for a search result item.
-    Keep title_text short.
-    """
-    if not data:
-        return ("Unknown", None)
-
-    # possible shapes: data['title'], data['name']
-    title = data.get("title") or data.get("name") or data.get("alternative_title") or "Unknown"
-
-    # MAL v2: may contain 'url' or 'node' etc
-    url = data.get("url") or data.get("mal_url")
-    # sometimes MAL search returns 'node' or 'entry' with 'url' inside
-    if not url:
-        for key in ("node", "entry", "anime", "manga"):
-            if data.get(key) and isinstance(data[key], dict) and data[key].get("url"):
-                url = data[key]["url"]
-                break
-
-    # trim extremely long titles
-    if len(title) > 80:
-        title = title[:77] + "..."
-    return (title, url)
-
-
-def _format_meta_line(data: Dict[str, Any]) -> str:
-    """
-    Build a compact single-line metadata string (rating, rank, episodes, status, start date).
-    Example: "⭐ 8.28 • #325 • EP: 500 • Finished_airing • Started: 2007-02-15"
-    """
+def _format_meta(obj: dict) -> str:
+    """Build a compact meta line from available fields."""
     parts = []
-    # score / rating
-    score = data.get("score") or data.get("mean") or data.get("rating")
-    if score is not None:
-        try:
-            parts.append(f"⭐ {float(score):.2f}")
-        except Exception:
-            parts.append(f"⭐ {score}")
+    get = lambda k: obj.get(k) if isinstance(obj, dict) else getattr(obj, k, None)
 
-    # rank
-    rank = data.get("rank") or data.get("ranking")
+    mean = get("mean")
+    rank = get("rank")
+    episodes = get("episodes")
+    chapters = get("chapters")
+    volumes = get("volumes")
+    status = get("status")
+
+    if mean is not None:
+        try:
+            parts.append(f"⭐ {mean}")
+        except Exception:
+            parts.append(f"⭐ {truncate(mean)}")
     if rank:
         parts.append(f"#{rank}")
-
-    # episodes / volumes / chapters
-    eps = data.get("episodes") or data.get("episodes_count") or data.get("ep")
-    if eps:
-        parts.append(f"EP: {eps}")
-
-    # status
-    status = data.get("status") or data.get("publication_status")
-    if status:
-        parts.append(str(status))
-
-    # started / aired
-    started = None
-    if "start_date" in data and data["start_date"]:
-        started = data["start_date"]
-    elif "aired" in data and isinstance(data["aired"], dict) and data["aired"].get("from"):
-        started = data["aired"]["from"]
-    if started:
-        # keep only date part if iso datetime
-        if isinstance(started, str) and "T" in started:
-            started = started.split("T", 1)[0]
-        parts.append(f"Started: {started}")
-
-    return " • ".join(parts)
-
-
-def embed_from_info(data: Dict[str, Any], kind: str = "anime") -> discord.Embed:
-    """
-    Build a richer embed for /info command.
-    """
-    if not data:
-        return error_embed("No data returned")
-
-    title = data.get("title") or data.get("name") or "Info"
-    url = data.get("url") or data.get("mal_url")
-    description = data.get("synopsis") or data.get("summary") or ""
-    embed = discord.Embed(title=title, url=url, description=(description[:400] + "..." if description and len(description) > 400 else description),
-                          color=0x2E86C1, timestamp=datetime.datetime.now(datetime.timezone.utc))
-    thumb = extract_image_url(data)
-    if thumb:
-        embed.set_thumbnail(url=thumb)
-
-    # add some fields compactly
-    score = data.get("score")
-    rank = data.get("rank")
-    episodes = data.get("episodes")
-    status = data.get("status")
-    started = None
-    if "start_date" in data:
-        started = data.get("start_date")
-    elif "aired" in data and isinstance(data["aired"], dict):
-        started = data["aired"].get("from")
-    if score:
-        embed.add_field(name="Score", value=str(score), inline=True)
-    if rank:
-        embed.add_field(name="Rank", value=str(rank), inline=True)
     if episodes:
-        embed.add_field(name="Episodes", value=str(episodes), inline=True)
+        parts.append(f"EP: {episodes}")
+    if chapters:
+        parts.append(f"CH: {chapters}")
+    if volumes:
+        parts.append(f"VOL: {volumes}")
     if status:
-        embed.add_field(name="Status", value=str(status), inline=True)
-    if started:
-        embed.add_field(name="Started", value=str(started), inline=True)
+        parts.append(str(status).replace("_", " ").capitalize())
+    return " • ".join(parts) if parts else "—"
 
+def anime_embed_from_models(title: str, items: Sequence, kind: str = "anime") -> discord.Embed:
+    """
+    Existing list-style embed (kept for compatibility).
+    """
+    embed = discord.Embed(title=truncate(title, 120), color=EMBED_COLOR)
+    embed.description = f"Top {len(items)} results from MyAnimeList"
+
+    # set thumbnail to first item's picture if available
+    first_picture = None
+    if items:
+        first = items[0]
+        first_picture = getattr(first, "picture", None) or (first.get("picture") if isinstance(first, dict) else None)
+    if first_picture:
+        embed.set_thumbnail(url=first_picture)
+
+    for idx, item in enumerate(items, 1):
+        name = truncate(getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—"), 80)
+        url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else "")
+        objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
+        meta = _format_meta(objdict)
+
+        value_lines = []
+        if url:
+            value_lines.append(f"[Open on MAL]({url})")
+        if meta:
+            value_lines.append(meta)
+        start_date = getattr(item, "start_date", None) or objdict.get("start_date")
+        if start_date:
+            value_lines.append(f"Started: {truncate(start_date, 40)}")
+
+        value = "\n".join(value_lines) or "\u200b"
+        embed.add_field(name=f"{idx}. {name}", value=value, inline=False)
+
+    tz = pytz.timezone("Asia/Kolkata")
+    embed.set_footer(text=f"Data from MyAnimeList • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
     return embed
+
+def single_item_embed(item, kind: str = "anime") -> discord.Embed:
+    """
+    Rich single-item embed.
+    """
+    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—")
+    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+    embed = discord.Embed(title=truncate(title, 180), color=EMBED_COLOR)
+    if url:
+        embed.url = url
+
+    picture = getattr(item, "picture", None) or (item.get("picture") if isinstance(item, dict) else None)
+    if picture:
+        embed.set_thumbnail(url=picture)
+
+    objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
+    lines = []
+    mean = objdict.get("mean")
+    if mean is not None:
+        lines.append(f"**Score:** {mean}")
+    if objdict.get("rank"):
+        lines.append(f"**Rank:** #{objdict.get('rank')}")
+    if objdict.get("episodes"):
+        lines.append(f"**Episodes:** {objdict.get('episodes')}")
+    if objdict.get("chapters"):
+        lines.append(f"**Chapters:** {objdict.get('chapters')}")
+    if objdict.get("volumes"):
+        lines.append(f"**Volumes:** {objdict.get('volumes')}")
+    if objdict.get("status"):
+        lines.append(f"**Status:** {str(objdict.get('status')).capitalize()}")
+    if objdict.get("start_date"):
+        lines.append(f"**Started:** {truncate(objdict.get('start_date'), 30)}")
+
+    synopsis = objdict.get("synopsis") or getattr(item, "synopsis", None)
+    if synopsis:
+        lines.append("\n" + truncate(synopsis, 700))
+
+    if lines:
+        embed.description = "\n".join(lines)
+
+    tz = pytz.timezone("Asia/Kolkata")
+    embed.set_footer(text=f"Data from MyAnimeList • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    return embed
+
+# --- NEW: one compact card per result (matches your screenshot style) ---
+def build_item_card_embed(item, index: int, source_label: str = "Data from MyAnimeList") -> discord.Embed:
+    """
+    Build a single 'card' embed for an Anime/Manga item.
+    Shows title with index, MAL thumbnail, compact meta and started date, plus a MAL link.
+    """
+    title_text = f"{index}. " + (getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "—"))
+    embed = discord.Embed(title=truncate(title_text, 180), color=EMBED_COLOR)
+
+    # Title hyperlink if we have a MAL URL
+    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+    if url:
+        embed.url = url
+
+    # Thumbnail (right side image)
+    picture = getattr(item, "picture", None) or (item.get("picture") if isinstance(item, dict) else None)
+    if picture:
+        embed.set_thumbnail(url=picture)
+
+    # Compact meta block
+    objdict = item.__dict__ if hasattr(item, "__dict__") else (item if isinstance(item, dict) else {})
+    meta = _format_meta(objdict)
+    if meta and meta != "—":
+        embed.add_field(name="\u200b", value=meta, inline=False)
+
+    # Start date
+    started = getattr(item, "start_date", None) or objdict.get("start_date")
+    if started:
+        embed.add_field(name="\u200b", value=f"Started: {truncate(started, 40)}", inline=False)
+
+    if url:
+        embed.add_field(name="\u200b", value=f"[Open on MAL]({url})", inline=False)
+
+    tz = pytz.timezone("Asia/Kolkata")
+    embed.set_footer(text=f"{source_label} • {datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    return embed
+
+def error_embed(message: str) -> discord.Embed:
+    e = discord.Embed(title="❌ Error", description=message, color=ERROR_COLOR)
+    tz = pytz.timezone("Asia/Kolkata")
+    e.set_footer(text=f"{datetime.now(tz).strftime('%Y-%m-%d %H:%M %Z')}")
+    return e
+
+def get_current_season(dt: Optional[datetime] = None) -> Tuple[int, str]:
+    """
+    Return (year, season) where season is one of: 'winter', 'spring', 'summer', 'fall'.
+    If dt is None uses current date in Asia/Kolkata timezone.
+    """
+    tz = pytz.timezone("Asia/Kolkata")
+    now = dt.astimezone(tz) if dt else datetime.now(tz)
+    month = now.month
+    year = now.year
+
+    if month in (1, 2, 3):
+        season = "winter"
+    elif month in (4, 5, 6):
+        season = "spring"
+    elif month in (7, 8, 9):
+        season = "summer"
+    else:
+        season = "fall"
+    return year, season
