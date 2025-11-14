@@ -1,241 +1,125 @@
-from __future__ import annotations
+# mal_client.py
 import os
 import aiohttp
-import asyncio
-from typing import Any, Dict, List, Optional
-from datetime import date
-import logging
+from typing import List, Dict, Any, Optional
+from cache import aiorun_cached
+from models import parse_anime, parse_manga, Anime, Manga
 
-API_BASE = "https://api.myanimelist.net/v2"
-_LOG = logging.getLogger(__name__)
+BASE = "https://api.myanimelist.net/v2"
+FIELDS_ANIME = "id,title,main_picture,mean,rank,status,num_episodes,start_date"
+FIELDS_MANGA = "id,title,main_picture,mean,rank,status,num_chapters,num_volumes,start_date"
 
-# -------------------------------
-# MALClient class (core client)
-# -------------------------------
 class MALClient:
     """
-    Minimal MAL v2 client.
-    Create with MALClient(client_id="...") or allow the module-level singleton to read env.
+    Robust MAL API client:
+      - Proper async context manager (async with MALClient() as mal:)
+      - close() coroutine to explicitly release the aiohttp session
+      - avoids leaking aiohttp.ClientSession objects
     """
-
-    # Optional fallback: you may set this here for quick local testing (not for public repos)
-    # CLIENT_ID = "ADD_YOUR_CLIENT_ID_HERE"  # <-- not recommended
 
     def __init__(self, client_id: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
-        self.client_id = client_id or getattr(self, "CLIENT_ID", None) or os.environ.get("MAL_CLIENT_ID")
-        self._own_session = False
-        if session is None:
-            self._session = aiohttp.ClientSession()
-            self._own_session = True
-        else:
-            self._session = session
-
-    async def close(self) -> None:
-        if self._own_session and not self._session.closed:
-            await self._session.close()
-
-    def _headers(self) -> Dict[str, str]:
+        self.client_id = client_id or os.getenv("MAL_CLIENT_ID")
         if not self.client_id:
-            raise RuntimeError(
-                "MAL Client ID not set. Set MAL_CLIENT_ID environment variable or pass client_id to MALClient."
+            raise RuntimeError("MAL_CLIENT_ID is missing")
+        self._session: Optional[aiohttp.ClientSession] = session
+        # If session was provided externally we should not close it here
+        self._own_session: bool = session is None
+
+    # ---------- context manager ----------
+    async def __aenter__(self):
+        # create session if we don't already have one
+        if self._session is None or getattr(self._session, "closed", False):
+            # create a session with the required headers
+            self._session = aiohttp.ClientSession(
+                headers={"X-MAL-CLIENT-ID": self.client_id, "Accept": "application/json"}
             )
-        return {"X-MAL-CLIENT-ID": self.client_id, "Accept": "application/json"}
+            self._own_session = True
+        return self
 
-    async def _get(self, path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Optional[Dict[str, Any]]:
-        url = API_BASE.rstrip("/") + "/" + path.lstrip("/")
-        headers = self._headers()
-        try:
-            async with self._session.get(url, headers=headers, params=params, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                if resp.status == 204:
-                    return {}
-                if resp.status == 400:
-                    txt = await resp.text()
-                    raise RuntimeError(f"MAL API 400 Bad Request: {txt}")
-                if resp.status == 401:
-                    raise RuntimeError("MAL API 401 Unauthorized - check your Client ID.")
-                if resp.status == 404:
-                    return None
-                txt = await resp.text()
-                raise RuntimeError(f"MAL API unexpected status {resp.status}: {txt}")
-        except asyncio.TimeoutError:
-            raise RuntimeError("MAL API request timed out")
-        except aiohttp.ClientError as e:
-            raise RuntimeError(f"MAL API client error: {e}")
+    async def __aexit__(self, exc_type, exc, tb):
+        # close the session if we created it
+        if self._own_session and self._session is not None:
+            try:
+                if not self._session.closed:
+                    await self._session.close()
+            finally:
+                self._session = None
+                self._own_session = False
 
-    # --- search endpoint wrapper ---
-    async def search(
-        self,
-        kind: str,
-        q: str,
-        limit: int = 15,
-        offset: int = 0,
-        fields: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        kind = kind.lower()
-        if kind not in ("anime", "manga", "character", "producer", "staff"):
-            raise ValueError("Unsupported kind for search: " + kind)
+    # Defensive: if someone accidentally uses a sync `with MALClient()` raise a helpful error
+    def __enter__(self):
+        raise RuntimeError("MALClient must be used with 'async with MALClient()' (it is async-only).")
 
-        params: Dict[str, Any] = {"q": q, "limit": limit, "offset": offset}
-        if fields:
-            params["fields"] = fields
+    def __exit__(self, exc_type, exc, tb):
+        # never called for async usage
+        return False
 
-        path = f"{kind}"
-        data = await self._get(path, params=params)
-        if not data:
-            return []
-        # MAL typically returns {'data': [...]}
-        if isinstance(data, dict) and "data" in data:
-            results = []
-            for item in data.get("data", []):
-                node = item.get("node") or item
-                results.append(node)
-            return results
-        if isinstance(data, list):
-            return data
-        return []
+    # Allow explicit close when not using context manager
+    async def close(self):
+        if self._session is not None:
+            try:
+                if not self._session.closed:
+                    await self._session.close()
+            finally:
+                self._session = None
+                self._own_session = False
 
-    # --- info endpoint wrapper (identifier first) ---
-    async def info(self, identifier: str, kind: str = "anime") -> Optional[Dict[str, Any]]:
-        kind = kind.lower()
-        if kind not in ("anime", "manga", "character", "producer", "staff"):
-            raise ValueError("Unsupported kind for info: " + kind)
+    @property
+    def session(self) -> aiohttp.ClientSession:
+        """
+        Return a ClientSession. If one does not exist yet, create one.
+        Note: this is synchronous; it constructs aiohttp.ClientSession without awaiting,
+        which is acceptable here because creating the session is not an async coroutine.
+        """
+        if self._session is None or getattr(self._session, "closed", False):
+            self._session = aiohttp.ClientSession(
+                headers={"X-MAL-CLIENT-ID": self.client_id, "Accept": "application/json"}
+            )
+            self._own_session = True
+        return self._session
 
-        common_fields = ",".join(
-            [
-                "id",
-                "title",
-                "main_picture",
-                "alternative_titles",
-                "start_date",
-                "end_date",
-                "num_episodes",
-                "mean",
-                "rank",
-                "popularity",
-                "status",
-                "media_type",
-                "genres",
-                "studios",
-                "synopsis",
-                "num_volumes",
-                "num_chapters",
-            ]
-        )
+    # ----------------- internal helper -----------------
+    async def _get(self, path: str, **params) -> Dict[str, Any]:
+        url = f"{BASE}{path}"
+        # ensure we operate with an active session; if session was closed, property recreates it
+        sess = self.session
+        async with sess.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            if r.status == 429:
+                raise RuntimeError("MAL rate limited. Try again shortly.")
+            if r.status >= 400:
+                text = await r.text()
+                raise RuntimeError(f"MAL error {r.status}: {text}")
+            return await r.json()
 
-        if identifier.isdigit():
-            path = f"{kind}/{identifier}"
-            params = {"fields": common_fields}
-            return await self._get(path, params=params)
+    # ---- Search ----
+    @aiorun_cached(ttl=300)
+    async def search_anime(self, query: str, limit: int = 5) -> List[Anime]:
+        data = await self._get("/anime", q=query, limit=min(limit, 10), fields=FIELDS_ANIME)
+        return [parse_anime(n) for n in data.get("data", [])]
 
-        # fallback: search and then request by id
-        results = await self.search(kind=kind, q=identifier, limit=1, fields=common_fields)
-        if not results:
-            return None
-        first = results[0]
-        mal_id = first.get("id")
-        if mal_id:
-            return await self.info(str(mal_id), kind=kind)
-        return first
+    @aiorun_cached(ttl=300)
+    async def search_manga(self, query: str, limit: int = 5) -> List[Manga]:
+        data = await self._get("/manga", q=query, limit=min(limit, 10), fields=FIELDS_MANGA)
+        return [parse_manga(n) for n in data.get("data", [])]
 
-    # --- seasonal listing ---
-    async def season(self, year: int, season_name: str, fields: Optional[str] = None) -> List[Dict[str, Any]]:
-        season_name = season_name.lower()
-        if season_name == "autumn":
-            season_name = "fall"
-        if season_name not in ("winter", "spring", "summer", "fall"):
-            raise ValueError("Invalid season. Use winter/spring/summer/fall")
+    # ---- Rankings ----
+    @aiorun_cached(ttl=600)
+    async def top_airing_anime(self, limit: int = 5) -> List[Anime]:
+        data = await self._get("/anime/ranking", ranking_type="airing", limit=min(limit, 10), fields=FIELDS_ANIME)
+        return [parse_anime(n) for n in data.get("data", [])]
 
-        params: Dict[str, Any] = {}
-        if fields:
-            params["fields"] = fields
-        path = f"anime/season/{year}/{season_name}"
-        data = await self._get(path, params=params)
-        if not data:
-            return []
-        if isinstance(data, dict) and "data" in data:
-            return [item.get("node") or item for item in data.get("data", [])]
-        return []
+    @aiorun_cached(ttl=600)
+    async def trending_anime(self, limit: int = 5) -> List[Anime]:
+        data = await self._get("/anime/ranking", ranking_type="bypopularity", limit=min(limit, 10), fields=FIELDS_ANIME)
+        return [parse_anime(n) for n in data.get("data", [])]
 
-    # --- utility: paginate list ---
-    @staticmethod
-    def paginate_list(items: List[Any], page: int = 1, per_page: int = 5) -> List[Any]:
-        start = (page - 1) * per_page
-        end = start + per_page
-        return items[start:end]
+    @aiorun_cached(ttl=600)
+    async def trending_manga(self, limit: int = 5) -> List[Manga]:
+        data = await self._get("/manga/ranking", ranking_type="bypopularity", limit=min(limit, 10), fields=FIELDS_MANGA)
+        return [parse_manga(n) for n in data.get("data", [])]
 
-# -------------------------------
-# Module-level singleton + helpers
-# -------------------------------
-_GLOBAL_CLIENT: Optional[MALClient] = None
-
-def _ensure_client() -> MALClient:
-    global _GLOBAL_CLIENT
-    if _GLOBAL_CLIENT is None:
-        # Build client from env if available; prefer env over hardcoded class value.
-        cid = os.environ.get("MAL_CLIENT_ID")
-        _GLOBAL_CLIENT = MALClient(client_id=cid)
-    return _GLOBAL_CLIENT
-
-async def close_client() -> None:
-    global _GLOBAL_CLIENT
-    if _GLOBAL_CLIENT is not None:
-        try:
-            await _GLOBAL_CLIENT.close()
-        finally:
-            _GLOBAL_CLIENT = None
-
-# Backwards-compatible module-level wrappers
-async def search(kind: str, q: str, limit: int = 15, offset: int = 0, fields: Optional[str] = None):
-    """
-    Module-level search wrapper for backward compatibility.
-    Usage: await mal_client.search("anime", "naruto", limit=10)
-    """
-    client = _ensure_client()
-    return await client.search(kind=kind, q=q, limit=limit, offset=offset, fields=fields)
-
-async def info(identifier: str, kind: str = "anime"):
-    """
-    Module-level info wrapper.
-    Usage: await mal_client.info("naruto", kind="anime") or await mal_client.info("1735")
-    """
-    client = _ensure_client()
-    return await client.info(identifier=identifier, kind=kind)
-
-async def season(year: int, season_name: str, fields: Optional[str] = None):
-    client = _ensure_client()
-    return await client.season(year=year, season_name=season_name, fields=fields)
-
-async def next_season(fields: Optional[str] = None):
-    """
-    Compute the next season from today and fetch that season's listing.
-
-    Example: If today is November 2025 (fall), the next season is winter 2026.
-    """
-    today = date.today()
-    m = today.month
-    # determine current season index:
-    # winter: Dec(12) Jan(1) Feb(2)
-    # spring: Mar(3) Apr(4) May(5)
-    # summer: Jun(6) Jul(7) Aug(8)
-    # fall: Sep(9) Oct(10) Nov(11)
-    if m in (12, 1, 2):
-        curr = "winter"
-    elif m in (3, 4, 5):
-        curr = "spring"
-    elif m in (6, 7, 8):
-        curr = "summer"
-    else:
-        curr = "fall"
-
-    order = ["winter", "spring", "summer", "fall"]
-    idx = order.index(curr)
-    next_idx = (idx + 1) % 4
-    next_season_name = order[next_idx]
-    next_year = today.year + (1 if next_season_name == "winter" and curr == "fall" else 0)
-    client = _ensure_client()
-    return await client.season(year=next_year, season_name=next_season_name, fields=fields)
-
-# expose class too if callers want to instantiate directly
-__all__ = ["MALClient", "search", "info", "season", "next_season", "close_client"]
+    # ---- Seasonals (current airing season) ----
+    @aiorun_cached(ttl=600)
+    async def seasonal(self, year: int, season: str, limit: int = 5) -> List[Anime]:
+        data = await self._get(f"/anime/season/{year}/{season}", limit=min(limit, 10), fields=FIELDS_ANIME)
+        return [parse_anime(n) for n in data.get("data", [])]
